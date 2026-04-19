@@ -82,6 +82,12 @@
 #define SCAN_MAX         135
 #define SCAN_STEP          5
 #define BUZZ_HZ         2000
+#define GYRO_Z_INVERT    -1
+#define ABANDON_TIMEOUT 1200000UL   // 20 минут без heartbeat
+#define MOTOR_L_INVERT   -1
+#define MOTOR_R_INVERT   -1
+#define MOTOR_L_SCALE     1.00f
+#define MOTOR_R_SCALE     0.90f
 
 // ── Одометрия и логирование ──────────────────────────────
 // Скорость при SPEED_FULL: откалибруй один раз!
@@ -116,6 +122,9 @@ Servo camServo;
 char uartBuf[16];
 uint8_t uartLen  = 0;
 unsigned long lastHB = 0;
+bool hbSeen = false;
+bool recAutoSent = false;
+bool abandonmentActive = false;
 char motorCmd    = 'S';
 
 // ============================================================
@@ -139,11 +148,14 @@ const BuzzStep PAT_SOS[]    PROGMEM = {
   {0,0}
 };
 const BuzzStep PAT_CRAWL[]  PROGMEM = { {200, 800}, {0, 0} };
+const BuzzStep PAT_ABANDONED[] PROGMEM = { {500, 20000}, {0, 0} };
 
 enum BuzzMode : uint8_t { BM_OFF, BM_CONTINUOUS, BM_PATTERN };
 BuzzMode buzzMode    = BM_OFF;
 const BuzzStep* buzzPat = nullptr;
 uint8_t  buzzIdx     = 0;
+uint16_t buzzLoops   = 0;
+uint16_t buzzMaxLoops = 0;
 bool     buzzOnPhase = false;
 unsigned long buzzTimer = 0;
 
@@ -288,10 +300,16 @@ static void applyMotor(int spd,
 }
 
 void setMotors(int left, int right) {
-  leftSpeed  = left;    // сохраняем для одометрии
+  // Сохраняем "идеальные" скорости для одометрии
+  leftSpeed  = left;
   rightSpeed = right;
-  applyMotor(left,  PIN_AIN1, PIN_AIN2, PIN_PWMA);
-  applyMotor(right, PIN_BIN1, PIN_BIN2, PIN_PWMB);
+
+  // Аппаратная калибровка: направление и баланс
+  int final_L = (int)(left  * MOTOR_L_SCALE * MOTOR_L_INVERT);
+  int final_R = (int)(right * MOTOR_R_SCALE * MOTOR_R_INVERT);
+
+  applyMotor(final_L, PIN_AIN1, PIN_AIN2, PIN_PWMA);
+  applyMotor(final_R, PIN_BIN1, PIN_BIN2, PIN_PWMB);
 }
 void stopMotors() { setMotors(0, 0); }
 
@@ -323,13 +341,22 @@ void mpuUpdate() {
   Wire.endTransmission(false);
   Wire.requestFrom((uint8_t)MPU_ADDR, (uint8_t)14, (uint8_t)true);
 
-  int16_t ax = ((int16_t)Wire.read() << 8) | Wire.read();
-  int16_t ay = ((int16_t)Wire.read() << 8) | Wire.read();
-  int16_t az = ((int16_t)Wire.read() << 8) | Wire.read();
+  int16_t rax = ((int16_t)Wire.read() << 8) | Wire.read();
+  int16_t ray = ((int16_t)Wire.read() << 8) | Wire.read();
+  int16_t raz = ((int16_t)Wire.read() << 8) | Wire.read();
   Wire.read(); Wire.read();            // температура — не нужна
-  int16_t gx = ((int16_t)Wire.read() << 8) | Wire.read();
-  Wire.read(); Wire.read();            // gy — не нужна
-  int16_t gz = ((int16_t)Wire.read() << 8) | Wire.read();  // рыскание — НОВОЕ
+  int16_t rgx = ((int16_t)Wire.read() << 8) | Wire.read();
+  int16_t rgy = ((int16_t)Wire.read() << 8) | Wire.read();
+  int16_t rgz = ((int16_t)Wire.read() << 8) | Wire.read();
+
+  // Программный поворот осей под физическую установку датчика:
+  // X робота вперёд = -Y сенсора, Y робота вправо = -X сенсора
+  int16_t ax = -ray;
+  int16_t ay = -rax;
+  int16_t az = raz;
+  int16_t gx = -rgy;
+  int16_t gy = -rgx;
+  int16_t gz = rgz;
 
   unsigned long now = millis();
   float dt = (float)(now - lastIMU) * 0.001f;
@@ -347,12 +374,9 @@ void mpuUpdate() {
   // Комплементарный фильтр тангажа
   pitch = 0.98f * (pitch + gRate * dt) + 0.02f * aPitch;
 
-  // Угловая скорость рыскания (для одометрии) — НОВОЕ
-  // gz: ±250°/с при делителе 131 LSB/(°/с)
-  // Знак зависит от ориентации платы — при необходимости сменить на -gz/131
-  gyroZ_dps = (float)gz / 131.0f;
+  // Угловая скорость рыскания (для одометрии)
+  gyroZ_dps = (float)(GYRO_Z_INVERT * gz) / 131.0f;
 }
-
 // ============================================================
 //  HC-SR04: медианный фильтр (3 быстрых замера)
 // ============================================================
@@ -381,24 +405,30 @@ void buzzOff() {
   buzzMode = BM_OFF;
   noTone(PIN_BUZZ);
   buzzIdx = 0;
+  buzzLoops = 0;
+  buzzMaxLoops = 0;
   buzzOnPhase = false;
 }
 
 void buzzContinuous() {
   if (buzzMode == BM_CONTINUOUS) return;
   buzzMode = BM_CONTINUOUS;
+  buzzLoops = 0;
+  buzzMaxLoops = 0;
   tone(PIN_BUZZ, BUZZ_HZ);
 }
 
-void buzzPattern(const BuzzStep* pat) {
-  if (buzzPat == pat && buzzMode == BM_PATTERN) return;
+void buzzPattern(const BuzzStep* pat, uint16_t maxLoops = 0) {
+  if (buzzPat == pat && buzzMode == BM_PATTERN && buzzMaxLoops == maxLoops) return;
   noTone(PIN_BUZZ);
-  buzzPat     = pat;
-  buzzIdx     = 0;
-  buzzMode    = BM_PATTERN;
-  buzzOnPhase = true;
+  buzzPat      = pat;
+  buzzIdx      = 0;
+  buzzLoops    = 0;
+  buzzMaxLoops = maxLoops;
+  buzzMode     = BM_PATTERN;
+  buzzOnPhase  = true;
   tone(PIN_BUZZ, BUZZ_HZ);
-  buzzTimer   = millis();
+  buzzTimer    = millis();
 }
 
 void buzzUpdate() {
@@ -406,6 +436,11 @@ void buzzUpdate() {
   unsigned long now = millis();
 
   if (buzzPat[buzzIdx].onMs == 0 && buzzPat[buzzIdx].offMs == 0) {
+    buzzLoops++;
+    if (buzzMaxLoops != 0 && buzzLoops >= buzzMaxLoops) {
+      buzzOff();
+      return;
+    }
     buzzIdx = 0;
     tone(PIN_BUZZ, BUZZ_HZ);
     buzzOnPhase = true;
@@ -441,6 +476,7 @@ void uartRead() {
 
     if (c == 'H') {
       lastHB = millis();
+      hbSeen = true;
       continue;
     }
 
@@ -636,10 +672,7 @@ void setup() {
   tone(PIN_BUZZ, 1500, 80); delay(200);
   tone(PIN_BUZZ, 2500, 80);
 
-  // Отправить ESP32 команду начать запись — НОВОЕ
-  // ESP32 получит "REC_AUTO\n" и автоматически запустит сессию
-  delay(1000);  // дать ESP32 время подняться
-  comSerial.print("REC_AUTO\n");
+  // REC_AUTO отправится после первого heartbeat от ESP32
 }
 
 // ============================================================
@@ -651,17 +684,27 @@ void loop() {
   // ── 1. Приём команд от ESP32-CAM ───────────────────────────
   uartRead();
 
+  // Отправляем REC_AUTO только после первого heartbeat от ESP32
+  if (!recAutoSent && hbSeen) {
+    comSerial.print("REC_AUTO\n");
+    recAutoSent = true;
+  }
+
   // ── 2. Обновление тангажа + рыскания (IMU_PERIOD мс) ───────
   if (now - lastIMU >= IMU_PERIOD) {
     mpuUpdate();
   }
 
-  // ── 3. Замер дистанций (DIST_PERIOD мс) ────────────────────
-  if (now - lastDist >= DIST_PERIOD) {
-    dF = medDist(TRIG_F, ECHO_F);
-    dL = medDist(TRIG_L, ECHO_L);
-    dR = medDist(TRIG_R, ECHO_R);
-    lastDist = millis();
+  // ── 3. Замер дистанций по одному датчику за раз ────────────
+  static uint8_t sonarPhase = 0;
+  if (now - lastDist >= (DIST_PERIOD / 3)) {
+    lastDist = now;
+    switch (sonarPhase) {
+      case 0: dF = medDist(TRIG_F, ECHO_F); break;
+      case 1: dL = medDist(TRIG_L, ECHO_L); break;
+      case 2: dR = medDist(TRIG_R, ECHO_R); break;
+    }
+    sonarPhase = (sonarPhase + 1) % 3;
   }
 
   // ── 4. АБСОЛЮТНЫЙ ПРИОРИТЕТ: защита от спуска ──────────────
@@ -672,7 +715,19 @@ void loop() {
     updateOdometry();
   }
 
-  // ── 6. Основная логика (если нет тревоги спуска) ───────────
+  // ── 6. Защита от потери оператора на долгое время ───────────
+  if (!abandonmentActive &&
+      (now - lastHB >= ABANDON_TIMEOUT) &&
+      robotState != ST_DESCENT_ALERT &&
+      robotState != ST_DESCENT_CRAWL) {
+    abandonmentActive = true;
+    robotState = ST_AUTO_DEAD;
+    motorCmd = 'S';
+    stopMotors();
+    buzzPattern(PAT_ABANDONED, 100);
+  }
+
+  // ── 7. Основная логика (если нет тревоги спуска) ───────────
   if (robotState != ST_DESCENT_ALERT && robotState != ST_DESCENT_CRAWL) {
     bool connLost = (now - lastHB > HB_TIMEOUT);
 
@@ -682,6 +737,7 @@ void loop() {
       motorCmd   = 'S';
       stopMotors();
       buzzOff();
+      abandonmentActive = false;
       if (logSignalLostSent) {
         logEvent(EVT_SIGNAL_BACK);  // лог восстановления — НОВОЕ
         logSignalLostSent = false;
@@ -714,6 +770,6 @@ void loop() {
     }
   }
 
-  // ── 7. Обновление зуммера ───────────────────────────────────
+  // ── 8. Обновление зуммера ───────────────────────────────────
   buzzUpdate();
 }
