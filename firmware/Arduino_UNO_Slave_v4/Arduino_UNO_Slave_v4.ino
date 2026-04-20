@@ -34,15 +34,15 @@
  * ============================================================
  */
 
-// #include <SoftwareSerial.h>
+#include <SoftwareSerial.h>
 #include <Servo.h>
 #include <Wire.h>
 
 // ============================================================
 //  ПИНЫ
 // ============================================================
-// #define SW_RX      10
-// #define SW_TX      11
+#define SW_RX      10
+#define SW_TX      11
 #define PIN_PWMA    5
 #define PIN_AIN1    4
 #define PIN_AIN2    3
@@ -114,7 +114,7 @@ RobotState robotState = ST_MANUAL;
 // ============================================================
 //  ОБЪЕКТЫ
 // ============================================================
-// SoftwareSerial comSerial(SW_RX, SW_TX);
+SoftwareSerial comSerial(SW_RX, SW_TX);
 Servo camServo;
 
 // ============================================================
@@ -239,7 +239,7 @@ void logEvent(LogEvent evt) {
            dF, dL, dR);
 
   // comSerial.print(buf);
-  Serial.print(buf);
+  // Serial.print(buf);
 
   // Сбросить накопленный поворот и отметку расстояния
   yaw_accumulated = 0.0f;
@@ -474,10 +474,10 @@ void buzzUpdate() {
 //  UART: чтение и разбор команд от ESP32-CAM
 // ============================================================
 void uartRead() {
-  // while (comSerial.available()) {
-  while (Serial.available()) {
-    // char c = (char)comSerial.read();
-    char c = (char)Serial.read();
+  while (comSerial.available()) {
+  // while (Serial.available()) {
+    char c = (char)comSerial.read();
+    // char c = (char)Serial.read();
 
     if (c == 'H') {
       lastHB = millis();
@@ -672,8 +672,8 @@ void setup() {
   mpuInit();
 
   // UART
-  // comSerial.begin(BAUD_SW);
-  Serial.begin(BAUD_SW);
+  comSerial.begin(BAUD_SW);
+  // Serial.begin(BAUD_SW);
 
   // Инициализировать хартбит
   lastHB = millis();
@@ -700,7 +700,7 @@ void loop() {
   // Отправляем REC_AUTO только после первого heartbeat от ESP32
   if (!recAutoSent && hbSeen) {
     // comSerial.print("REC_AUTO\n");
-    Serial.print("REC_AUTO\n");
+    // Serial.print("REC_AUTO\n");
     recAutoSent = true;
   }
 
