@@ -65,8 +65,9 @@
 #define BAUD_SW          9600
 #define SPEED_FULL       200
 #define SPEED_SLOW        76
-#define SPEED_STEER_HI   215
-#define SPEED_STEER_LO   120
+#define SPEED_AUTO       100   // Уменьшенная базовая скорость автопилота
+#define SPEED_AUTO_STEER_HI 120 // Подруливание (быстрая гусеница)
+#define SPEED_AUTO_STEER_LO  80 // Подруливание (медленная гусеница)
 #define DIST_FRONT_STOP   15
 #define DIST_FRONT_CLEAR  20
 #define DIST_SIDE_DEAD    12
@@ -123,6 +124,7 @@ char uartBuf[16];
 uint8_t uartLen  = 0;
 unsigned long lastHB = 0;
 bool hbSeen = false;
+bool clientConnected = false; // true = клиент подключён по Wi-Fi
 bool recAutoSent = false;
 bool abandonmentActive = false;
 char motorCmd    = 'S';
@@ -258,7 +260,7 @@ void updateOdometry() {
   float avgPWM = 0.0f;
   if (robotState == ST_AUTO_FWD ||
       robotState == ST_AUTO_TURN ||
-      robotState == ST_MANUAL && hbSeen) {
+      robotState == ST_MANUAL) {
     int lAbs = abs(leftSpeed);
     int rAbs = abs(rightSpeed);
     avgPWM = (float)(lAbs + rAbs) / 2.0f;
@@ -477,6 +479,13 @@ void uartRead() {
     if (c == 'H') {
       lastHB = millis();
       hbSeen = true;
+      clientConnected = true; // Клиент в сети
+      continue;
+    }
+    if (c == 'A') {
+      lastHB = millis();
+      hbSeen = true;
+      clientConnected = false; // Клиент отвалился -> автопилот
       continue;
     }
 
@@ -533,11 +542,11 @@ void handleManual() {
 void handleAutoFwd() {
   if (dF < DIST_FRONT_STOP) {
     stopMotors();
-    logEvent(EVT_OBSTACLE);     // лог препятствия — НОВОЕ
+    logEvent(EVT_OBSTACLE);
     if (dL < DIST_SIDE_DEAD && dR < DIST_SIDE_DEAD) {
       robotState = ST_AUTO_DEAD;
       buzzPattern(PAT_SOS);
-      logEvent(EVT_DEAD_END);   // лог тупика — НОВОЕ
+      logEvent(EVT_DEAD_END);
     } else {
       turnToLeft = (dL >= dR);
       robotState = ST_AUTO_TURN;
@@ -546,11 +555,11 @@ void handleAutoFwd() {
   }
 
   long diff = (long)dR - (long)dL;
-  int lSpd = SPEED_FULL, rSpd = SPEED_FULL;
+  int lSpd = SPEED_AUTO, rSpd = SPEED_AUTO;
   if (diff > HYSTERESIS) {
-    lSpd = SPEED_STEER_HI; rSpd = SPEED_STEER_LO;
+    lSpd = SPEED_AUTO_STEER_HI; rSpd = SPEED_AUTO_STEER_LO;
   } else if (diff < -HYSTERESIS) {
-    lSpd = SPEED_STEER_LO; rSpd = SPEED_STEER_HI;
+    lSpd = SPEED_AUTO_STEER_LO; rSpd = SPEED_AUTO_STEER_HI;
   }
   setMotors(lSpd, rSpd);
 }
@@ -563,8 +572,8 @@ void handleAutoTurn() {
     robotState = ST_AUTO_FWD;
     return;
   }
-  if (turnToLeft) setMotors(-SPEED_FULL,  SPEED_FULL);
-  else            setMotors( SPEED_FULL, -SPEED_FULL);
+  if (turnToLeft) setMotors(-SPEED_AUTO,  SPEED_AUTO);
+  else            setMotors( SPEED_AUTO, -SPEED_AUTO);
 }
 
 // ============================================================
@@ -729,44 +738,59 @@ void loop() {
 
   // ── 7. Основная логика (если нет тревоги спуска) ───────────
   if (robotState != ST_DESCENT_ALERT && robotState != ST_DESCENT_CRAWL) {
-    bool connLost = (now - lastHB > HB_TIMEOUT);
+    bool espLost = (now - lastHB > HB_TIMEOUT);
 
-    // Переход: связь восстановлена
-    if (!connLost && robotState != ST_MANUAL) {
-      robotState = ST_MANUAL;
-      motorCmd   = 'S';
-      stopMotors();
-      buzzOff();
-      abandonmentActive = false;
-      if (logSignalLostSent) {
-        logEvent(EVT_SIGNAL_BACK);  // лог восстановления — НОВОЕ
-        logSignalLostSent = false;
+    if (espLost) {
+      // КРИТИЧЕСКАЯ ПОТЕРЯ ESP32: Стоим на месте! Никакого автопилота!
+      if (robotState != ST_MANUAL || motorCmd != 'S') {
+        robotState = ST_MANUAL;
+        motorCmd = 'S';
+        stopMotors();
       }
-    }
+      buzzPattern(PAT_BEACON); // Просто пищим, прося о помощи
 
-    // Переход: связь потеряна → автопилот
-    if (connLost && robotState == ST_MANUAL) {
-      robotState = ST_AUTO_FWD;
-      buzzPattern(PAT_BEACON);
-      if (!logSignalLostSent) {
-        logEvent(EVT_SIGNAL_LOST);  // лог потери связи — НОВОЕ
-        logSignalLostSent = true;
-      }
-    }
-
-    // Диспетчер состояний
-    switch (robotState) {
-      case ST_MANUAL:    handleManual();   break;
-      case ST_AUTO_FWD:  handleAutoFwd();  break;
-      case ST_AUTO_TURN: handleAutoTurn(); break;
-      case ST_AUTO_DEAD: handleAutoDead(); break;
-      default: break;
-    }
-
-    if (!connLost) {
-      // серво-угол применяется в uartRead()
     } else {
-      updateScan(now);
+      // ESP32 на связи. Смотрим, есть ли клиент по Wi-Fi
+      if (clientConnected) {
+        // Управление с телефона
+        if (robotState != ST_MANUAL) {
+          robotState = ST_MANUAL;
+          stopMotors();
+          buzzOff();
+          abandonmentActive = false;
+          if (logSignalLostSent) {
+            logEvent(EVT_SIGNAL_BACK);
+            logSignalLostSent = false;
+          }
+        }
+      } else {
+        // Телефон отвалился, включаем самостоятельный АВТОПИЛОТ
+        if (robotState == ST_MANUAL) {
+          robotState = ST_AUTO_FWD;
+          buzzPattern(PAT_BEACON);
+          if (!logSignalLostSent) {
+            logEvent(EVT_SIGNAL_LOST);
+            logSignalLostSent = true;
+          }
+        }
+      }
+    }
+
+    // Выполнение команд текущего состояния
+    if (!espLost) {
+      switch (robotState) {
+        case ST_MANUAL:    handleManual();   break;
+        case ST_AUTO_FWD:  handleAutoFwd();  break;
+        case ST_AUTO_TURN: handleAutoTurn(); break;
+        case ST_AUTO_DEAD: handleAutoDead(); break;
+        default: break;
+      }
+    }
+
+    if (clientConnected || espLost) {
+      // В ручном режиме угол сервы идет из браузера
+    } else {
+      updateScan(now); // В автопилоте вертим камерой сами
     }
   }
 

@@ -402,6 +402,12 @@ bool initCamera() {
   s->set_aec2(s, 1);
   s->set_awb_gain(s, 1);
   s->set_whitebal(s, 1);
+
+  // --- ДОБАВЛЕНО ДЛЯ ПЕРЕВОРОТА КАМЕРЫ НА 180° ---
+  s->set_vflip(s, 1);   // Переворот по вертикали (вверх ногами)
+  s->set_hmirror(s, 1); // Отзеркаливание (чтобы право и лево не перепутались)
+  // -----------------------------------------------
+
   Serial.println("[CAM] OK");
   return true;
 }
@@ -731,10 +737,31 @@ void loop() {
   // ── Хартбит → Arduino только пока есть подключённый клиент ─────
   // Если клиентов нет — Arduino потеряет хартбит и через HB_TIMEOUT
   // (3 сек) перейдёт в режим автопилота. Это и есть нужное поведение.
-  if (clients > 0 && now - lastHB >= HEARTBEAT_MS) {
-    Serial.write('H');
+  // if (clients > 0 && now - lastHB >= HEARTBEAT_MS) {
+  //   Serial.write('H');
+  //   lastHB = now;
+  // }
+
+  if (now - lastHB >= HEARTBEAT_MS) {
+    uint8_t clients = WiFi.softAPgetStationNum();
+    
+    if (clients > 0) {
+      Serial.write('H'); // Клиент есть - ручное управление
+    } else {
+      Serial.write('A'); // Клиентов нет - сигнал для автопилота
+      
+      // Если клиент отвалился, принудительно стартуем запись, если еще не пишем
+      if (!isRecording && sdOK) {
+        isRecording = startRecordingSession();
+        if (isRecording) {
+          logFilePath = ""; // сброс файла для новой сессии
+          Serial.println("[REC] Аварийный автостарт записи (клиент потерян)");
+        }
+      }
+    }
     lastHB = now;
   }
+
 
   // ── Когда клиент отвалился — убедиться что запись идёт ─────────
   static bool prevClientsZero = false;
