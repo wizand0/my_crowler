@@ -90,6 +90,9 @@
 #define MOTOR_L_SCALE     1.00f
 #define MOTOR_R_SCALE     0.90f
 
+unsigned long lastCmdTime = 0;
+#define CMD_TIMEOUT 500   // мс
+
 // ── Одометрия и логирование ──────────────────────────────
 // Скорость при SPEED_FULL: откалибруй один раз!
 // Засеки время на 1 метр при PWM=200, раздели 1/время
@@ -110,6 +113,8 @@ enum RobotState : uint8_t {
   ST_DESCENT_CRAWL
 };
 RobotState robotState = ST_MANUAL;
+
+bool autoMode = false;
 
 // ============================================================
 //  ОБЪЕКТЫ
@@ -491,9 +496,20 @@ void uartRead() {
       clientConnected = false; // Клиент отвалился -> автопилот
       continue;
     }
+    
+    if (c == 'X') {   // включить автопилот
+      autoMode = true;
+      continue;
+    }
+
+    if (c == 'M') {   // выключить автопилот
+      autoMode = false;
+      continue;
+    }
 
     if (c == 'F' || c == 'B' || c == 'L' || c == 'R' || c == 'S') {
       motorCmd = c;
+      lastCmdTime = millis();   // 👈 добавь это
       uartLen  = 0;
       continue;
     }
@@ -503,6 +519,7 @@ void uartRead() {
       uartBuf[uartLen++] = c;
       continue;
     }
+
     if (uartLen > 0 && uartBuf[0] == 'P') {
       if (c == '\n' || c == '\r') {
         uartBuf[uartLen] = '\0';
@@ -523,12 +540,26 @@ void uartRead() {
 //  ОБРАБОТЧИК: Ручной режим
 // ============================================================
 void handleManual() {
+  if (millis() - lastCmdTime > CMD_TIMEOUT) {
+    motorCmd = 'S';
+  }
+
+  if (motorCmd == 'S') {
+    stopMotors();
+    return;
+  }
   switch (motorCmd) {
+static bool obstacleLogged = false;
+
     case 'F':
       if (dF < DIST_FRONT_STOP) {
         stopMotors();
-        logEvent(EVT_OBSTACLE);   // лог препятствия — НОВОЕ
+        if (!obstacleLogged) {
+          logEvent(EVT_OBSTACLE);
+          obstacleLogged = true;
+        }
       } else {
+        obstacleLogged = false;
         setMotors(SPEED_FULL, SPEED_FULL);
       }
       break;
@@ -743,59 +774,68 @@ void loop() {
 
   // ── 7. Основная логика (если нет тревоги спуска) ───────────
   if (robotState != ST_DESCENT_ALERT && robotState != ST_DESCENT_CRAWL) {
-    bool espLost = (now - lastHB > HB_TIMEOUT);
 
-    if (espLost) {
-      // КРИТИЧЕСКАЯ ПОТЕРЯ ESP32: Стоим на месте! Никакого автопилота!
-      if (robotState != ST_MANUAL || motorCmd != 'S') {
-        robotState = ST_MANUAL;
-        motorCmd = 'S';
+    bool espAlive = (now - lastHB <= HB_TIMEOUT);
+
+    // 🔴 1. ESP32 умер
+    if (!espAlive) {
+      if (robotState != ST_AUTO_DEAD) {
+        robotState = ST_AUTO_DEAD;
         stopMotors();
+        buzzPattern(PAT_BEACON);
       }
-      buzzPattern(PAT_BEACON); // Просто пищим, прося о помощи
+    }
 
-    } else {
-      // ESP32 на связи. Смотрим, есть ли клиент по Wi-Fi
-      if (clientConnected) {
-        // Управление с телефона
-        if (robotState != ST_MANUAL) {
-          robotState = ST_MANUAL;
-          stopMotors();
-          buzzOff();
-          abandonmentActive = false;
-          if (logSignalLostSent) {
-            logEvent(EVT_SIGNAL_BACK);
-            logSignalLostSent = false;
-          }
-        }
-      } else {
-        // Телефон отвалился, включаем самостоятельный АВТОПИЛОТ
-        if (robotState == ST_MANUAL && hbSeen) {
+    // 🟡 2. ESP32 жив
+    else {
+
+      // 👉 Логика автопилота
+      bool shouldAuto = (!clientConnected) || autoMode;
+
+      if (shouldAuto) {
+
+        if (robotState != ST_AUTO_FWD &&
+            robotState != ST_AUTO_TURN &&
+            robotState != ST_AUTO_DEAD) {
+
           robotState = ST_AUTO_FWD;
           buzzPattern(PAT_BEACON);
+
           if (!logSignalLostSent) {
             logEvent(EVT_SIGNAL_LOST);
             logSignalLostSent = true;
           }
         }
+
+      } else {
+
+        // 🟢 Ручной режим
+        if (robotState != ST_MANUAL) {
+          robotState = ST_MANUAL;
+          stopMotors();
+          buzzOff();
+          abandonmentActive = false;
+
+          if (logSignalLostSent) {
+            logEvent(EVT_SIGNAL_BACK);
+            logSignalLostSent = false;
+          }
+        }
       }
     }
 
-    // Выполнение команд текущего состояния
-    if (!espLost) {
-      switch (robotState) {
-        case ST_MANUAL:    handleManual();   break;
-        case ST_AUTO_FWD:  handleAutoFwd();  break;
-        case ST_AUTO_TURN: handleAutoTurn(); break;
-        case ST_AUTO_DEAD: handleAutoDead(); break;
-        default: break;
-      }
+    // ── Выполнение ───────────────────────────────
+    switch (robotState) {
+      case ST_MANUAL:    handleManual();   break;
+      case ST_AUTO_FWD:  handleAutoFwd();  break;
+      case ST_AUTO_TURN: handleAutoTurn(); break;
+      case ST_AUTO_DEAD: handleAutoDead(); break;
+      default: break;
     }
 
-    if (clientConnected || espLost) {
-      // В ручном режиме угол сервы идет из браузера
-    } else {
-      updateScan(now); // В автопилоте вертим камерой сами
+    // ── Камера / сканирование ───────────────────
+    if (!clientConnected || autoMode) {
+      updateScan(now);
     }
   }
 

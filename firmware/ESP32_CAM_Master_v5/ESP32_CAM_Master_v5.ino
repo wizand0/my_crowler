@@ -95,6 +95,8 @@ int        frameNum     = 0;
 String     sessionDir   = "";
 String     logFilePath  = "";
 
+bool autoMode = false;
+
 unsigned long lastHB        = 0;
 unsigned long lastFrameSave = 0;
 unsigned long lastCmdSend   = 0;
@@ -125,6 +127,20 @@ static const char INDEX_HTML[] = R"rawliteral(
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <title>Crawler Inspector</title>
 <style>
+#autoBtn{
+  padding:7px 14px;
+  background:#30363d;
+  color:#fff;
+  border:none;
+  border-radius:6px;
+  cursor:pointer;
+  font-size:.85em;
+  font-weight:600;
+}
+#autoBtn.active{
+  background:#f85149;
+}
+
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 body{background:#0d1117;color:#c9d1d9;font-family:'Segoe UI',Arial,sans-serif;
      display:flex;flex-direction:column;align-items:center;min-height:100vh;padding:8px;gap:8px}
@@ -182,6 +198,7 @@ h1{color:#58a6ff;font-size:1.1em;letter-spacing:3px;padding:6px 0}
   <div class="infoItem"><span class="iLabel">Команда</span><div id="cmdBox">S</div></div>
   <div class="infoItem"><span class="iLabel">Камера</span><div class="iVal" id="servoDisp">90°</div></div>
   <div class="infoItem"><span class="iLabel">Запись</span><button id="recBtn" onclick="toggleRec()">● REC</button></div>
+  <div class="infoItem"><span class="iLabel">AUTO</span><button id="autoBtn" onclick="toggleAuto()">AUTO OFF</button></div>
   <div class="infoItem"><span class="iLabel">Пинг</span><div class="iVal" id="pingVal">--</div></div>
   <div class="infoItem"><span class="iLabel">Статус</span><div class="iVal" id="stateVal">--</div></div>
 </div>
@@ -287,6 +304,30 @@ function onServo(v){
   servoTimer = setTimeout(()=>fetch('/cmd?s='+v), 60);
 }
 
+// ── Включение авторпилота ──────────────────────────────────────
+let autoMode = false;
+
+function toggleAuto(){
+  autoMode = !autoMode;
+
+  fetch('/auto', {
+    method: 'POST',
+    body: autoMode ? '1' : '0'
+  });
+
+  const btn = document.getElementById('autoBtn');
+
+  if(autoMode){
+    btn.textContent = "AUTO ON";
+    btn.classList.add("active");
+    document.body.style.background = "#200";
+  } else {
+    btn.textContent = "AUTO OFF";
+    btn.classList.remove("active");
+    document.body.style.background = "#0d1117";
+  }
+}
+
 // ── Запись ────────────────────────────────────────────────────
 let recording = false;
 function toggleRec(){
@@ -307,6 +348,12 @@ setInterval(()=>{
       document.getElementById('recOverlay').className = 'overlay show';
       document.getElementById('recBtn').className = 'active';
       recording = true;
+    }
+    if (d.state === "AUTO") {
+      autoMode = true;
+      const btn = document.getElementById('autoBtn');
+      btn.textContent = "AUTO ON";
+      btn.classList.add("active");
     }
     if (d.log && d.log !== '') {
       // Декодировать лог: LOG:CHK,dist_cm,yaw*10,pitch*10,dF,dL,dR
@@ -390,7 +437,7 @@ bool initCamera() {
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
-    Serial.printf("[CAM] Ошибка init: 0x%x\n", err);
+    // Serial.printf("[CAM] Ошибка init: 0x%x\n", err);
     return false;
   }
 
@@ -408,7 +455,7 @@ bool initCamera() {
   s->set_hmirror(s, 1); // Отзеркаливание (чтобы право и лево не перепутались)
   // -----------------------------------------------
 
-  Serial.println("[CAM] OK");
+  // Serial.println("[CAM] OK");
   return true;
 }
 
@@ -417,14 +464,14 @@ bool initCamera() {
 // ============================================================
 bool initSD() {
   if (!SD_MMC.begin("/sdcard", true)) {
-    Serial.println("[SD] Нет карты или ошибка");
+    // Serial.println("[SD] Нет карты или ошибка");
     return false;
   }
   if (SD_MMC.cardType() == CARD_NONE) {
-    Serial.println("[SD] Карта не определена");
+    // Serial.println("[SD] Карта не определена");
     return false;
   }
-  Serial.printf("[SD] OK, размер: %llu MB\n", SD_MMC.cardSize() / (1024 * 1024));
+  // Serial.printf("[SD] OK, размер: %llu MB\n", SD_MMC.cardSize() / (1024 * 1024));
   return true;
 }
 
@@ -438,7 +485,7 @@ bool startRecordingSession() {
       SD_MMC.mkdir(path.c_str());
       sessionDir = path;
       frameNum   = 0;
-      Serial.printf("[SD] Сессия: %s\n", sessionDir.c_str());
+      // Serial.printf("[SD] Сессия: %s\n", sessionDir.c_str());
       return true;
     }
     n++;
@@ -470,6 +517,7 @@ void writeRouteLog(const char* logLine) {
     }
     // Записать заголовок
     File f = SD_MMC.open(logFilePath.c_str(), FILE_WRITE);
+    if (!f) return;
     if (f) {
       f.println("time_ms,event,dist_cm,yaw_x10,pitch_x10,dF,dL,dR");
       f.close();
@@ -506,7 +554,7 @@ void readArduinoUart() {
             isRecording = startRecordingSession();
             if (isRecording) {
               logFilePath = "";  // сбросить, чтобы создался новый файл
-              Serial.println("[REC] Автостарт по команде Arduino");
+              // Serial.println("[REC] Автостарт по команде Arduino");
             }
           }
         }
@@ -540,7 +588,7 @@ static esp_err_t handleCmd(httpd_req_t* req) {
   size_t qLen = httpd_req_get_url_query_len(req);
   if (qLen > 0 && qLen < sizeof(buf)) {
     httpd_req_get_url_query_str(req, buf, qLen + 1);
-    char val[8];
+    char val[16];
     if (httpd_query_key_value(buf, "m", val, sizeof(val)) == ESP_OK) {
       char c = val[0];
       if (c=='F'||c=='B'||c=='L'||c=='R'||c=='S') {
@@ -553,11 +601,56 @@ static esp_err_t handleCmd(httpd_req_t* req) {
       int ang = atoi(val);
       servoAngle = constrain(ang, 0, 180);
       char cmd[8];
-      snprintf(cmd, sizeof(cmd), "P%d\n", servoAngle);
+      snprintf(cmd, sizeof(cmd), "P%d\n", constrain(servoAngle, 0, 180));
       Serial.print(cmd);
     }
   }
   httpd_resp_set_type(req, "text/plain");
+  httpd_resp_send(req, "OK", 2);
+  return ESP_OK;
+}
+
+static esp_err_t handleAuto(httpd_req_t *req) {
+  char buf[8];
+  // int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+
+  int total = 0;
+
+  while (total < (int)sizeof(buf) - 1) {
+    int r = httpd_req_recv(req, buf + total, sizeof(buf) - 1 - total);
+    if (r <= 0) {
+      break;
+    }
+    total += r;
+  }
+
+  // проверка, что что-то реально получили
+  if (total <= 0) {
+    httpd_resp_send(req, "ERR", 3);
+    return ESP_FAIL;
+  }
+
+  // завершаем строку
+  buf[total] = '\0';
+
+  if (len <= 0 || len >= sizeof(buf)) {
+    httpd_resp_send(req, "ERR", 3);
+    return ESP_FAIL;
+  }
+  buf[len] = '\0';
+
+  if (buf[0] == '1') {
+    autoMode = true;
+    Serial.write('X');   // включить автопилот
+    strncpy(crawlerStatus, "AUTO", sizeof(crawlerStatus) - 1);
+    crawlerStatus[sizeof(crawlerStatus) - 1] = '\0';
+  } else {
+    autoMode = false;
+    Serial.write('M');   // ручной режим
+    strncpy(crawlerStatus, "MANUAL", sizeof(crawlerStatus) - 1);
+    crawlerStatus[sizeof(crawlerStatus) - 1] = '\0';
+  }
+
   httpd_resp_send(req, "OK", 2);
   return ESP_OK;
 }
@@ -579,7 +672,7 @@ static esp_err_t handleRec(httpd_req_t* req) {
         sessionDir  = "";
         frameNum    = 0;
         logFilePath = "";
-        Serial.println("[REC] Запись остановлена");
+        // Serial.println("[REC] Запись остановлена");
       }
     }
   }
@@ -598,13 +691,18 @@ static esp_err_t handlePing(httpd_req_t* req) {
 // GET /status  → JSON с состоянием (НОВОЕ v2)
 static esp_err_t handleStatus(httpd_req_t* req) {
   char json[256];
+  String safeLog = lastLogLine;
+  safeLog.replace("\"", "'");
+
   snprintf(json, sizeof(json),
     "{\"state\":\"%s\",\"rec\":%s,\"log\":\"%s\",\"servo\":%d}",
     crawlerStatus,
     isRecording ? "true" : "false",
-    lastLogLine,
+    safeLog.c_str(),
     servoAngle
   );
+
+
   httpd_resp_set_type(req, "application/json");
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
   httpd_resp_send(req, json, strlen(json));
@@ -622,7 +720,10 @@ static esp_err_t handleStream(httpd_req_t* req) {
 
   while (true) {
     fb = esp_camera_fb_get();
-    if (!fb) { res = ESP_FAIL; break; }
+    if (!fb) {
+      res = ESP_FAIL;
+      break;
+    }
 
     if (isRecording && millis() - lastFrameSave >= FRAME_SAVE_MS) {
       saveFrame(fb);
@@ -640,7 +741,7 @@ static esp_err_t handleStream(httpd_req_t* req) {
 
     esp_camera_fb_return(fb);
     if (res != ESP_OK) break;
-    vTaskDelay(pdMS_TO_TICKS(40));
+    vTaskDelay(pdMS_TO_TICKS(60));
   }
   return res;
 }
@@ -658,6 +759,12 @@ void startWebServer() {
   httpd_uri_t recUri    = {"/rec",    HTTP_GET, handleRec,    NULL};
   httpd_uri_t pingUri   = {"/ping",   HTTP_GET, handlePing,   NULL};
   httpd_uri_t statusUri = {"/status", HTTP_GET, handleStatus, NULL};  // НОВОЕ
+  httpd_uri_t autoUri = {
+  .uri = "/auto",
+  .method = HTTP_POST,
+  .handler = handleAuto,
+  .user_ctx = NULL
+};
 
   if (httpd_start(&webSrv, &cfg) == ESP_OK) {
     httpd_register_uri_handler(webSrv, &rootUri);
@@ -665,7 +772,8 @@ void startWebServer() {
     httpd_register_uri_handler(webSrv, &recUri);
     httpd_register_uri_handler(webSrv, &pingUri);
     httpd_register_uri_handler(webSrv, &statusUri);
-    Serial.println("[WEB] Сервер запущен на порту 80");
+    httpd_register_uri_handler(webSrv, &autoUri);
+    // Serial.println("[WEB] Сервер запущен на порту 80");
   }
 }
 
@@ -679,7 +787,7 @@ void startStreamServer() {
 
   if (httpd_start(&streamSrv, &cfg) == ESP_OK) {
     httpd_register_uri_handler(streamSrv, &streamUri);
-    Serial.println("[STREAM] Сервер запущен на порту 81");
+    // Serial.println("[STREAM] Сервер запущен на порту 81");
   }
 }
 
@@ -692,11 +800,12 @@ void setup() {
   // UART0 для связи с Arduino UNO
   Serial.begin(UART_BAUD);
   delay(300);
-  Serial.println("[SYS] ESP32-CAM Crawler Inspector v2.0");
+  Serial.write('S');
+  // Serial.println("[SYS] ESP32-CAM Crawler Inspector v2.0");
 
   // Инициализация камеры
   if (!initCamera()) {
-    Serial.println("[SYS] КРИТИЧНО: камера не инициализирована");
+    // Serial.println("[SYS] КРИТИЧНО: камера не инициализирована");
     while (true) { delay(200); }
   }
 
@@ -707,8 +816,9 @@ void setup() {
   if (sdOK) {
     isRecording = startRecordingSession();
     if (isRecording) {
-      Serial.printf("[REC] Автостарт: %s\n", sessionDir.c_str());
-      strncpy(crawlerStatus, "REC_AUTO", sizeof(crawlerStatus));
+      // Serial.printf("[REC] Автостарт: %s\n", sessionDir.c_str());
+      strncpy(crawlerStatus, "REC_AUTO", sizeof(crawlerStatus) - 1);
+      crawlerStatus[sizeof(crawlerStatus) - 1] = '\0';
     }
   }
 
@@ -716,15 +826,15 @@ void setup() {
   WiFi.mode(WIFI_AP);
   WiFi.softAPConfig(AP_IP, AP_GW, AP_SN);
   WiFi.softAP(AP_SSID, AP_PASS);
-  Serial.printf("[WIFI] AP: %s  IP: %s\n",
-                AP_SSID, WiFi.softAPIP().toString().c_str());
+  // Serial.printf("[WIFI] AP: %s  IP: %s\n",
+  //               AP_SSID, WiFi.softAPIP().toString().c_str());
 
   // HTTP серверы
   startWebServer();
   startStreamServer();
 
   lastHB = millis();
-  Serial.println("[SYS] Готов к работе!");
+  // Serial.println("[SYS] Готов к работе!");
 }
 
 // ============================================================
@@ -743,7 +853,6 @@ void loop() {
   // }
 
   if (now - lastHB >= HEARTBEAT_MS) {
-    uint8_t clients = WiFi.softAPgetStationNum();
     
     if (clients > 0) {
       Serial.write('H'); // Клиент есть - ручное управление
@@ -755,7 +864,7 @@ void loop() {
         isRecording = startRecordingSession();
         if (isRecording) {
           logFilePath = ""; // сброс файла для новой сессии
-          Serial.println("[REC] Аварийный автостарт записи (клиент потерян)");
+          // Serial.println("[REC] Аварийный автостарт записи (клиент потерян)");
         }
       }
     }
@@ -767,13 +876,14 @@ void loop() {
   static bool prevClientsZero = false;
   if (clients == 0 && !prevClientsZero) {
     // Клиент только что отключился
-    Serial.println("[WIFI] Клиент отключился → автопилот на Arduino");
+    // Serial.println("[WIFI] Клиент отключился → автопилот на Arduino");
     if (sdOK && !isRecording) {
       isRecording = startRecordingSession();
       if (isRecording) {
         logFilePath = "";
-        Serial.println("[REC] Запись запущена после потери клиента");
-        strncpy(crawlerStatus, "AUTO_REC", sizeof(crawlerStatus));
+        // Serial.println("[REC] Запись запущена после потери клиента");
+        strncpy(crawlerStatus, "AUTO_REC", sizeof(crawlerStatus) - 1);
+        crawlerStatus[sizeof(crawlerStatus) - 1] = '\0';
       }
     }
   }
@@ -790,6 +900,20 @@ void loop() {
     Serial.write('S');
   }
 
+  // if (clients > 0 && autoMode == false) {
+  //   strncpy(crawlerStatus, "MANUAL", sizeof(crawlerStatus) - 1);
+  //   crawlerStatus[sizeof(crawlerStatus) - 1] = '\0';
+  // }
+
+  if (clients > 0) {
+    if (autoMode)
+      strncpy(crawlerStatus, "AUTO", sizeof(crawlerStatus) - 1);
+    else
+      strncpy(crawlerStatus, "MANUAL", sizeof(crawlerStatus) - 1);
+
+    crawlerStatus[sizeof(crawlerStatus) - 1] = '\0';
+  }
+
   // ── Чтение UART от Arduino (LOG: строки) — НОВОЕ v2 ────────
   readArduinoUart();
 
@@ -797,13 +921,13 @@ void loop() {
   static unsigned long lastStatus = 0;
   if (now - lastStatus >= 10000) {
     lastStatus = now;
-    Serial.printf("[INFO] Клиентов AP: %d | Запись: %s | Серво: %d°\n",
-                  WiFi.softAPgetStationNum(),
-                  isRecording ? "ВКЛ" : "ВЫКЛ",
-                  servoAngle);
+    // Serial.printf("[INFO] Клиентов AP: %d | Запись: %s | Серво: %d°\n",
+    //               WiFi.softAPgetStationNum(),
+    //               isRecording ? "ВКЛ" : "ВЫКЛ",
+    //               servoAngle);
     if (sdOK && isRecording) {
-      Serial.printf("[INFO] Кадров записано: %d | Лог: %s\n",
-                    frameNum, logFilePath.c_str());
+      // Serial.printf("[INFO] Кадров записано: %d | Лог: %s\n",
+      //               frameNum, logFilePath.c_str());
     }
   }
 
