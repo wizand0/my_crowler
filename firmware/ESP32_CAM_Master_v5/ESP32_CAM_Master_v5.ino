@@ -455,7 +455,6 @@ bool initCamera() {
   s->set_hmirror(s, 1); // Отзеркаливание (чтобы право и лево не перепутались)
   // -----------------------------------------------
 
-  // Serial.println("[CAM] OK");
   return true;
 }
 
@@ -464,14 +463,11 @@ bool initCamera() {
 // ============================================================
 bool initSD() {
   if (!SD_MMC.begin("/sdcard", true)) {
-    // Serial.println("[SD] Нет карты или ошибка");
     return false;
   }
   if (SD_MMC.cardType() == CARD_NONE) {
-    // Serial.println("[SD] Карта не определена");
     return false;
   }
-  // Serial.printf("[SD] OK, размер: %llu MB\n", SD_MMC.cardSize() / (1024 * 1024));
   return true;
 }
 
@@ -485,7 +481,6 @@ bool startRecordingSession() {
       SD_MMC.mkdir(path.c_str());
       sessionDir = path;
       frameNum   = 0;
-      // Serial.printf("[SD] Сессия: %s\n", sessionDir.c_str());
       return true;
     }
     n++;
@@ -554,7 +549,6 @@ void readArduinoUart() {
             isRecording = startRecordingSession();
             if (isRecording) {
               logFilePath = "";  // сбросить, чтобы создался новый файл
-              // Serial.println("[REC] Автостарт по команде Arduino");
             }
           }
         }
@@ -633,11 +627,11 @@ static esp_err_t handleAuto(httpd_req_t *req) {
   // завершаем строку
   buf[total] = '\0';
 
-  if (len <= 0 || len >= sizeof(buf)) {
+  if (total <= 0 || total >= sizeof(buf)) {
     httpd_resp_send(req, "ERR", 3);
     return ESP_FAIL;
   }
-  buf[len] = '\0';
+  buf[total] = '\0';
 
   if (buf[0] == '1') {
     autoMode = true;
@@ -672,7 +666,6 @@ static esp_err_t handleRec(httpd_req_t* req) {
         sessionDir  = "";
         frameNum    = 0;
         logFilePath = "";
-        // Serial.println("[REC] Запись остановлена");
       }
     }
   }
@@ -773,7 +766,6 @@ void startWebServer() {
     httpd_register_uri_handler(webSrv, &pingUri);
     httpd_register_uri_handler(webSrv, &statusUri);
     httpd_register_uri_handler(webSrv, &autoUri);
-    // Serial.println("[WEB] Сервер запущен на порту 80");
   }
 }
 
@@ -787,7 +779,6 @@ void startStreamServer() {
 
   if (httpd_start(&streamSrv, &cfg) == ESP_OK) {
     httpd_register_uri_handler(streamSrv, &streamUri);
-    // Serial.println("[STREAM] Сервер запущен на порту 81");
   }
 }
 
@@ -801,11 +792,9 @@ void setup() {
   Serial.begin(UART_BAUD);
   delay(300);
   Serial.write('S');
-  // Serial.println("[SYS] ESP32-CAM Crawler Inspector v2.0");
 
   // Инициализация камеры
   if (!initCamera()) {
-    // Serial.println("[SYS] КРИТИЧНО: камера не инициализирована");
     while (true) { delay(200); }
   }
 
@@ -816,7 +805,6 @@ void setup() {
   if (sdOK) {
     isRecording = startRecordingSession();
     if (isRecording) {
-      // Serial.printf("[REC] Автостарт: %s\n", sessionDir.c_str());
       strncpy(crawlerStatus, "REC_AUTO", sizeof(crawlerStatus) - 1);
       crawlerStatus[sizeof(crawlerStatus) - 1] = '\0';
     }
@@ -826,15 +814,13 @@ void setup() {
   WiFi.mode(WIFI_AP);
   WiFi.softAPConfig(AP_IP, AP_GW, AP_SN);
   WiFi.softAP(AP_SSID, AP_PASS);
-  // Serial.printf("[WIFI] AP: %s  IP: %s\n",
-  //               AP_SSID, WiFi.softAPIP().toString().c_str());
+
 
   // HTTP серверы
   startWebServer();
   startStreamServer();
 
   lastHB = millis();
-  // Serial.println("[SYS] Готов к работе!");
 }
 
 // ============================================================
@@ -847,10 +833,6 @@ void loop() {
   // ── Хартбит → Arduino только пока есть подключённый клиент ─────
   // Если клиентов нет — Arduino потеряет хартбит и через HB_TIMEOUT
   // (3 сек) перейдёт в режим автопилота. Это и есть нужное поведение.
-  // if (clients > 0 && now - lastHB >= HEARTBEAT_MS) {
-  //   Serial.write('H');
-  //   lastHB = now;
-  // }
 
   if (now - lastHB >= HEARTBEAT_MS) {
     
@@ -864,7 +846,6 @@ void loop() {
         isRecording = startRecordingSession();
         if (isRecording) {
           logFilePath = ""; // сброс файла для новой сессии
-          // Serial.println("[REC] Аварийный автостарт записи (клиент потерян)");
         }
       }
     }
@@ -876,12 +857,11 @@ void loop() {
   static bool prevClientsZero = false;
   if (clients == 0 && !prevClientsZero) {
     // Клиент только что отключился
-    // Serial.println("[WIFI] Клиент отключился → автопилот на Arduino");
+
     if (sdOK && !isRecording) {
       isRecording = startRecordingSession();
       if (isRecording) {
         logFilePath = "";
-        // Serial.println("[REC] Запись запущена после потери клиента");
         strncpy(crawlerStatus, "AUTO_REC", sizeof(crawlerStatus) - 1);
         crawlerStatus[sizeof(crawlerStatus) - 1] = '\0';
       }
@@ -900,11 +880,6 @@ void loop() {
     Serial.write('S');
   }
 
-  // if (clients > 0 && autoMode == false) {
-  //   strncpy(crawlerStatus, "MANUAL", sizeof(crawlerStatus) - 1);
-  //   crawlerStatus[sizeof(crawlerStatus) - 1] = '\0';
-  // }
-
   if (clients > 0) {
     if (autoMode)
       strncpy(crawlerStatus, "AUTO", sizeof(crawlerStatus) - 1);
@@ -921,13 +896,8 @@ void loop() {
   static unsigned long lastStatus = 0;
   if (now - lastStatus >= 10000) {
     lastStatus = now;
-    // Serial.printf("[INFO] Клиентов AP: %d | Запись: %s | Серво: %d°\n",
-    //               WiFi.softAPgetStationNum(),
-    //               isRecording ? "ВКЛ" : "ВЫКЛ",
-    //               servoAngle);
+
     if (sdOK && isRecording) {
-      // Serial.printf("[INFO] Кадров записано: %d | Лог: %s\n",
-      //               frameNum, logFilePath.c_str());
     }
   }
 
