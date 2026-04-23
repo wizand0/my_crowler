@@ -782,7 +782,8 @@ void loop() {
   // ── 7. Основная логика (если нет тревоги спуска) ───────────
   if (robotState != ST_DESCENT_ALERT && robotState != ST_DESCENT_CRAWL) {
 
-    bool espAlive = (now - lastHB <= HB_TIMEOUT);
+    // bool espAlive = (now - lastHB <= HB_TIMEOUT);
+    bool espAlive = autoMode ? true : (now - lastHB <= HB_TIMEOUT);
 
     // 🔴 1. ESP32 умер
     if (!espAlive && !autoMode) {
