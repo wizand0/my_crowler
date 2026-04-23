@@ -792,7 +792,7 @@ void loop() {
         stopMotors();
         buzzPattern(PAT_BEACON);
       }
-
+    }
     // 🟡 2. ESP32 жив
     else {
 
