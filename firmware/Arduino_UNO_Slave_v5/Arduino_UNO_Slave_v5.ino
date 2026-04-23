@@ -41,14 +41,20 @@
 // ============================================================
 //  ПИНЫ
 // ============================================================
+// #define PIN_PWMA    5
+// #define PIN_AIN1    4
+// #define PIN_AIN2    3
+// #define PIN_PWMB    6
+// #define PIN_BIN1    7
+// #define PIN_BIN2    8
 #define SW_RX      10
 #define SW_TX      11
-#define PIN_PWMA    5
-#define PIN_AIN1    4
-#define PIN_AIN2    3
-#define PIN_PWMB    6
-#define PIN_BIN1    7
-#define PIN_BIN2    8
+#define PIN_PWMA    6
+#define PIN_AIN1    7
+#define PIN_AIN2    8
+#define PIN_PWMB    5
+#define PIN_BIN1    4
+#define PIN_BIN2    3
 #define PIN_SERVO   2
 #define PIN_BUZZ    9
 #define TRIG_F     A0
