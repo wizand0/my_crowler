@@ -505,6 +505,7 @@ void uartRead() {
     
     if (c == 'X') {   // включить автопилот
       autoMode = true;
+      lastHB = millis();
       continue;
     }
 
