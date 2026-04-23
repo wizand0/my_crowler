@@ -784,13 +784,12 @@ void loop() {
     bool espAlive = (now - lastHB <= HB_TIMEOUT);
 
     // 🔴 1. ESP32 умер
-    if (!espAlive) {
+    if (!espAlive && !autoMode) {
       if (robotState != ST_AUTO_DEAD) {
         robotState = ST_AUTO_DEAD;
         stopMotors();
         buzzPattern(PAT_BEACON);
       }
-    }
 
     // 🟡 2. ESP32 жив
     else {
