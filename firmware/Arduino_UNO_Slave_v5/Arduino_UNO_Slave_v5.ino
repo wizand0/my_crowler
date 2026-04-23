@@ -65,9 +65,9 @@
 #define BAUD_SW          9600
 #define SPEED_FULL       200
 #define SPEED_SLOW        76
-#define SPEED_AUTO       100   // Уменьшенная базовая скорость автопилота
-#define SPEED_AUTO_STEER_HI 120 // Подруливание (быстрая гусеница)
-#define SPEED_AUTO_STEER_LO  80 // Подруливание (медленная гусеница)
+#define SPEED_AUTO       50   // Уменьшенная базовая скорость автопилота
+#define SPEED_AUTO_STEER_HI 80 // Подруливание (быстрая гусеница)
+#define SPEED_AUTO_STEER_LO  50 // Подруливание (медленная гусеница)
 #define DIST_FRONT_STOP   15
 #define DIST_FRONT_CLEAR  20
 #define DIST_SIDE_DEAD    12
