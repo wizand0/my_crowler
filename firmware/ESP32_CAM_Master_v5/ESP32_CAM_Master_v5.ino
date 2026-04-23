@@ -875,7 +875,8 @@ void loop() {
     lastCmdSend = now;
   }
   // Если клиент отвалился — отправить стоп один раз
-  if (clients == 0 && motorCmd != 'S') {
+  // if (clients == 0 && motorCmd != 'S') {
+  if (clients == 0 && motorCmd != 'S' && !autoMode) {
     motorCmd = 'S';
     Serial.write('S');
   }
