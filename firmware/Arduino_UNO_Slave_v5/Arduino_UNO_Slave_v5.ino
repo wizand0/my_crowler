@@ -551,28 +551,11 @@ void handleManual() {
     motorCmd = 'S';
   }
 
-  if (motorCmd == 'S') {
-    stopMotors();
-    return;
-  }
   switch (motorCmd) {
-static bool obstacleLogged = false;
-
-    case 'F':
-      if (dF < DIST_FRONT_STOP) {
-        stopMotors();
-        if (!obstacleLogged) {
-          logEvent(EVT_OBSTACLE);
-          obstacleLogged = true;
-        }
-      } else {
-        obstacleLogged = false;
-        setMotors(SPEED_FULL, SPEED_FULL);
-      }
-      break;
+    case 'F': setMotors(SPEED_FULL, SPEED_FULL); break;
     case 'B': setMotors(-SPEED_FULL, -SPEED_FULL); break;
-    case 'L': setMotors(-SPEED_FULL,  SPEED_FULL); break;
-    case 'R': setMotors( SPEED_FULL, -SPEED_FULL); break;
+    case 'L': setMotors(-SPEED_FULL, SPEED_FULL); break;
+    case 'R': setMotors(SPEED_FULL, -SPEED_FULL); break;
     default:  stopMotors(); break;
   }
 }
@@ -581,9 +564,16 @@ static bool obstacleLogged = false;
 //  ОБРАБОТЧИК: Автопилот — вперёд
 // ============================================================
 void handleAutoFwd() {
+  static bool obstacleLogged = false;
+
   if (dF < DIST_FRONT_STOP) {
     stopMotors();
-    logEvent(EVT_OBSTACLE);
+
+    if (!obstacleLogged) {
+      logEvent(EVT_OBSTACLE);
+      obstacleLogged = true;
+    }
+
     if (dL < DIST_SIDE_DEAD && dR < DIST_SIDE_DEAD) {
       robotState = ST_AUTO_DEAD;
       buzzPattern(PAT_SOS);
@@ -595,13 +585,19 @@ void handleAutoFwd() {
     return;
   }
 
+  obstacleLogged = false;
+
   long diff = (long)dR - (long)dL;
   int lSpd = SPEED_AUTO, rSpd = SPEED_AUTO;
+
   if (diff > HYSTERESIS) {
-    lSpd = SPEED_AUTO_STEER_HI; rSpd = SPEED_AUTO_STEER_LO;
+    lSpd = SPEED_AUTO_STEER_HI;
+    rSpd = SPEED_AUTO_STEER_LO;
   } else if (diff < -HYSTERESIS) {
-    lSpd = SPEED_AUTO_STEER_LO; rSpd = SPEED_AUTO_STEER_HI;
+    lSpd = SPEED_AUTO_STEER_LO;
+    rSpd = SPEED_AUTO_STEER_HI;
   }
+
   setMotors(lSpd, rSpd);
 }
 
@@ -649,15 +645,14 @@ void checkDescent(unsigned long now) {
 
   } else if (pitch > RECOVERY_TRIG) {
     if (descentAlertActive || descentCrawlActive) {
-      bool wasConnected  = (now - lastHB <= HB_TIMEOUT);
       descentAlertActive = false;
       descentCrawlActive = false;
       stopMotors();
       buzzOff();
-      motorCmd   = 'S';
-      logEvent(EVT_DESCENT_END);  // лог конца спуска — НОВОЕ
-      robotState = wasConnected ? ST_MANUAL : ST_AUTO_FWD;
-      if (!wasConnected) buzzPattern(PAT_BEACON);
+      motorCmd = 'S';
+      logEvent(EVT_DESCENT_END);
+      robotState = ST_AUTO_FWD;
+      buzzPattern(PAT_BEACON);
     }
   }
 }
@@ -760,7 +755,9 @@ void loop() {
   }
 
   // ── 4. АБСОЛЮТНЫЙ ПРИОРИТЕТ: защита от спуска ──────────────
-  checkDescent(now);
+  if (robotState != ST_MANUAL) {
+    checkDescent(now);
+  }
 
   // ── 5. Одометрия и логирование маршрута — НОВОЕ ────────────
   if (robotState != ST_DESCENT_ALERT && robotState != ST_DESCENT_CRAWL) {
