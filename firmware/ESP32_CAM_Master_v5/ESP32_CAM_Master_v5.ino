@@ -834,18 +834,18 @@ void loop() {
   // Если клиентов нет — Arduino потеряет хартбит и через HB_TIMEOUT
   // (3 сек) перейдёт в режим автопилота. Это и есть нужное поведение.
 
+
   if (now - lastHB >= HEARTBEAT_MS) {
-    
     if (clients > 0) {
-      Serial.write('H'); // Клиент есть - ручное управление
+      Serial.write('H');   // оператор подключён
     } else {
-      Serial.write('A'); // Клиентов нет - сигнал для автопилота
-      
-      // Если клиент отвалился, принудительно стартуем запись, если еще не пишем
+      Serial.write('A');   // оператор пропал, перейти/остаться в автономной миссии
+
+      // Видео должно продолжать писаться в любом случае
       if (!isRecording && sdOK) {
         isRecording = startRecordingSession();
         if (isRecording) {
-          logFilePath = ""; // сброс файла для новой сессии
+          logFilePath = "";
         }
       }
     }
@@ -882,11 +882,18 @@ void loop() {
   }
 
   if (clients > 0) {
-    if (autoMode)
+    if (autoMode) {
       strncpy(crawlerStatus, "AUTO", sizeof(crawlerStatus) - 1);
-    else
+    } else {
       strncpy(crawlerStatus, "MANUAL", sizeof(crawlerStatus) - 1);
-
+    }
+    crawlerStatus[sizeof(crawlerStatus) - 1] = '\0';
+  } else {
+    if (autoMode) {
+      strncpy(crawlerStatus, "AUTO_NO_WIFI", sizeof(crawlerStatus) - 1);
+    } else {
+      strncpy(crawlerStatus, "LINK_LOST_AUTO", sizeof(crawlerStatus) - 1);
+    }
     crawlerStatus[sizeof(crawlerStatus) - 1] = '\0';
   }
 

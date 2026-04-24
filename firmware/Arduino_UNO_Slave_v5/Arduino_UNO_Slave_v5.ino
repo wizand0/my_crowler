@@ -71,30 +71,53 @@
 #define BAUD_SW          9600
 #define SPEED_FULL       200
 #define SPEED_SLOW        76
-#define SPEED_AUTO       50   // Уменьшенная базовая скорость автопилота
-#define SPEED_AUTO_STEER_HI 80 // Подруливание (быстрая гусеница)
-#define SPEED_AUTO_STEER_LO  50 // Подруливание (медленная гусеница)
-#define DIST_FRONT_STOP   15
-#define DIST_FRONT_CLEAR  20
-#define DIST_SIDE_DEAD    12
-#define HYSTERESIS         3
-#define HB_TIMEOUT      3000
-#define DESCENT_TRIG   -30.0f
-#define RECOVERY_TRIG  -10.0f
-#define DESCENT_HOLD   20000
-#define DIST_PERIOD      250
-#define IMU_PERIOD        20
-#define SCAN_PERIOD      100
-#define SCAN_MIN          45
-#define SCAN_MAX         135
-#define SCAN_STEP          5
-#define BUZZ_HZ         2000
-#define GYRO_Z_INVERT    -1
-#define ABANDON_TIMEOUT 1200000UL   // 20 минут без heartbeat
-#define MOTOR_L_INVERT   -1
-#define MOTOR_R_INVERT   -1
-#define MOTOR_L_SCALE     1.00f
-#define MOTOR_R_SCALE     0.90f
+#define SPEED_AUTO          55    // базовая скорость автопилота
+#define SPEED_AUTO_MIN      42    // минимальная скорость в тесных местах
+#define SPEED_AUTO_MAX      95    // максимальная скорость на свободном участке
+
+
+#define DIST_FRONT_STOP     15
+#define DIST_FRONT_CLEAR    24
+#define DIST_SIDE_DEAD      12
+#define DIST_SIDE_WARN      18
+
+#define DESCENT_TRIG     -30.0f
+#define RECOVERY_TRIG    -10.0f
+
+#define DIST_PERIOD        250
+#define IMU_PERIOD          20
+#define SCAN_PERIOD        100
+#define SCAN_MIN            45
+#define SCAN_MAX           135
+#define SCAN_STEP            5
+
+#define BUZZ_HZ           2000
+#define GYRO_Z_INVERT      -1
+
+#define AUTO_MISSION_TIME 1200000UL   // 20 минут автономного движения
+#define MANUAL_FAILSAFE_TIMEOUT 3000UL
+#define TILT_PAUSE_MS        8000UL
+#define TILT_TRY_MOVE_MS      900UL   // короткая попытка проехать после паузы
+#define TILT_TRY_SPEED         65     // скорость короткой попытки
+#define TILT_RETRY_LIMIT       20
+
+// --- Фильтр наклона ---
+#define TILT_CONFIRM_COUNT     5       // сколько подряд плохих измерений нужно
+#define TILT_RELEASE_COUNT    5       // сколько подряд хороших измерений нужно
+#define TILT_CONFIRM_MS      200UL     // наклон должен держаться минимум столько
+
+// --- Реверс перед разворотом ---
+#define REVERSE_BEFORE_TURN_MS 350UL
+#define REVERSE_SPEED           70
+
+// --- Память препятствия / застревания ---
+#define TURN_FAIL_LIMIT          5    // сколько неудачных разворотов подряд считаем тупиком
+#define OBSTACLE_MEMORY_MS    12000UL // окно памяти одного и того же препятствия
+
+#define MOTOR_L_INVERT        -1
+#define MOTOR_R_INVERT        -1
+#define MOTOR_L_SCALE       1.00f
+#define MOTOR_R_SCALE       0.90f
 
 unsigned long lastCmdTime = 0;
 #define CMD_TIMEOUT 500   // мс
@@ -113,14 +136,36 @@ unsigned long lastCmdTime = 0;
 enum RobotState : uint8_t {
   ST_MANUAL,
   ST_AUTO_FWD,
+  ST_AUTO_REVERSE,
   ST_AUTO_TURN,
   ST_AUTO_DEAD,
-  ST_DESCENT_ALERT,
-  ST_DESCENT_CRAWL
+  ST_TILT_PAUSE,
+  ST_TILT_TRY_MOVE
 };
 RobotState robotState = ST_MANUAL;
 
 bool autoMode = false;
+
+bool autoMissionActive = false;          // сейчас выполняется автономная миссия
+unsigned long autoMissionStart = 0;      // старт миссии
+unsigned long tiltPauseStart = 0;        // начало паузы из-за наклона
+unsigned long tiltTryMoveStart = 0;      // старт короткой попытки движения
+uint8_t tiltRetryCount = 0;              // число повторных попыток после опасного наклона
+bool tiltPauseActive = false;            // активна пауза по наклону
+
+
+// --- Фильтр наклона ---
+uint8_t tiltBadCount = 0;
+uint8_t tiltGoodCount = 0;
+unsigned long tiltFirstBadMs = 0;
+
+// --- Память препятствия ---
+uint8_t repeatedObstacleCount = 0;
+unsigned long lastObstacleMs = 0;
+
+// --- Реверс перед разворотом ---
+unsigned long reverseStartMs = 0;
+bool reverseTurnToLeft = true;
 
 // ============================================================
 //  ОБЪЕКТЫ
@@ -137,7 +182,6 @@ unsigned long lastHB = 0;
 bool hbSeen = false;
 bool clientConnected = false; // true = клиент подключён по Wi-Fi
 bool recAutoSent = false;
-bool abandonmentActive = false;
 char motorCmd    = 'S';
 
 // ============================================================
@@ -160,7 +204,7 @@ const BuzzStep PAT_SOS[]    PROGMEM = {
   {100,100},{100,100},{100,700},
   {0,0}
 };
-const BuzzStep PAT_CRAWL[]  PROGMEM = { {200, 800}, {0, 0} };
+
 const BuzzStep PAT_ABANDONED[] PROGMEM = { {500, 20000}, {0, 0} };
 
 enum BuzzMode : uint8_t { BM_OFF, BM_CONTINUOUS, BM_PATTERN };
@@ -185,12 +229,7 @@ unsigned long lastIMU = 0;
 long dF = 200, dL = 200, dR = 200;
 unsigned long lastDist = 0;
 
-// ============================================================
-//  ФЛАГИ СПУСКА
-// ============================================================
-bool descentAlertActive = false;
-bool descentCrawlActive = false;
-unsigned long descentStart = 0;
+
 
 // ============================================================
 //  ПОВОРОТ В АВТОПИЛОТЕ
@@ -212,14 +251,16 @@ int rightSpeed = 0;
 //  ЛОГИРОВАНИЕ — НОВОЕ v2
 // ============================================================
 enum LogEvent : uint8_t {
-  EVT_CHECKPOINT,   // плановая отметка каждые 0.5 м
-  EVT_TURN,         // значимый поворот накопился
-  EVT_DESCENT,      // обнаружен спуск
-  EVT_DESCENT_END,  // спуск завершён
-  EVT_OBSTACLE,     // препятствие спереди
-  EVT_DEAD_END,     // тупик
-  EVT_SIGNAL_LOST,  // потеря хартбита → автопилот
-  EVT_SIGNAL_BACK,  // хартбит восстановился
+  EVT_CHECKPOINT,
+  EVT_TURN,
+  EVT_TILT,
+  EVT_TILT_RESUME,
+  EVT_OBSTACLE,
+  EVT_DEAD_END,
+  EVT_SIGNAL_LOST,
+  EVT_SIGNAL_BACK,
+  EVT_AUTO_START,
+  EVT_AUTO_END
 };
 
 bool logSignalLostSent = false;  // чтобы не спамить при потере связи
@@ -227,32 +268,29 @@ bool logSignalLostSent = false;  // чтобы не спамить при пот
 void logEvent(LogEvent evt) {
   const char* evtName;
   switch (evt) {
-    case EVT_CHECKPOINT:  evtName = "CHK";   break;
-    case EVT_TURN:        evtName = "TURN";  break;
-    case EVT_DESCENT:     evtName = "DESC";  break;
-    case EVT_DESCENT_END: evtName = "DEND";  break;
-    case EVT_OBSTACLE:    evtName = "OBS";   break;
-    case EVT_DEAD_END:    evtName = "DEAD";  break;
-    case EVT_SIGNAL_LOST: evtName = "WLOST"; break;
-    case EVT_SIGNAL_BACK: evtName = "WOK";   break;
-    default:              evtName = "UNK";   break;
+    case EVT_CHECKPOINT:  evtName = "CHK";    break;
+    case EVT_TURN:        evtName = "TURN";   break;
+    case EVT_TILT:        evtName = "TILT";   break;
+    case EVT_TILT_RESUME: evtName = "TRES";   break;
+    case EVT_OBSTACLE:    evtName = "OBS";    break;
+    case EVT_DEAD_END:    evtName = "DEAD";   break;
+    case EVT_SIGNAL_LOST: evtName = "WLOST";  break;
+    case EVT_SIGNAL_BACK: evtName = "WOK";    break;
+    case EVT_AUTO_START:  evtName = "ASTART"; break;
+    case EVT_AUTO_END:    evtName = "AEND";   break;
+    default:              evtName = "UNK";    break;
   }
 
-  // Формат: LOG:EVT,dist_m,yaw_acc,pitch,dF,dL,dR
   char buf[64];
-  // Умножаем на 100 и делаем целые числа — dtostrf медленный на UNO
-  int dist_cm  = (int)(odo_distance * 100);
-  int yaw_x10  = (int)(yaw_accumulated * 10);
+  int dist_cm   = (int)(odo_distance * 100);
+  int yaw_x10   = (int)(yaw_accumulated * 10);
   int pitch_x10 = (int)(pitch * 10);
 
   snprintf(buf, sizeof(buf), "LOG:%s,%d,%d,%d,%ld,%ld,%ld\n",
-           evtName, dist_cm, yaw_x10, pitch_x10,
-           dF, dL, dR);
+           evtName, dist_cm, yaw_x10, pitch_x10, dF, dL, dR);
 
-  // comSerial.print(buf);
-  // Serial.print(buf);
+  comSerial.print(buf);
 
-  // Сбросить накопленный поворот и отметку расстояния
   yaw_accumulated = 0.0f;
   odo_last_logged = odo_distance;
 }
@@ -272,7 +310,9 @@ void updateOdometry() {
   float avgPWM = 0.0f;
   if (robotState == ST_AUTO_FWD ||
       robotState == ST_AUTO_TURN ||
+      robotState == ST_TILT_TRY_MOVE ||
       robotState == ST_MANUAL) {
+
     int lAbs = abs(leftSpeed);
     int rAbs = abs(rightSpeed);
     avgPWM = (float)(lAbs + rAbs) / 2.0f;
@@ -491,26 +531,83 @@ void uartRead() {
     // char c = (char)Serial.read();
 
     if (c == 'H') {
+      bool wasDisconnected = !clientConnected;
       lastHB = millis();
       hbSeen = true;
-      clientConnected = true; // Клиент в сети
-      continue;
-    }
-    if (c == 'A') {
-      lastHB = millis();
-      hbSeen = true;
-      clientConnected = false; // Клиент отвалился -> автопилот
-      continue;
-    }
-    
-    if (c == 'X') {   // включить автопилот
-      autoMode = true;
-      lastHB = millis();
+      clientConnected = true;
+
+      if (wasDisconnected && logSignalLostSent) {
+        logEvent(EVT_SIGNAL_BACK);
+        logSignalLostSent = false;
+      }
       continue;
     }
 
-    if (c == 'M') {   // выключить автопилот
+    if (c == 'A') {
+      lastHB = millis();
+      hbSeen = true;
+
+      if (clientConnected) {
+        logEvent(EVT_SIGNAL_LOST);
+        logSignalLostSent = true;
+      }
+
+      clientConnected = false;
+
+      // Если уже включён автопилот или оператор пропал, миссию не останавливаем
+
+      if (!autoMissionActive) {
+        autoMissionActive = true;
+        autoMissionStart = millis();
+        tiltRetryCount = 0;
+        tiltPauseActive = false;
+        tiltBadCount = 0;
+        tiltGoodCount = 0;
+        tiltFirstBadMs = 0;
+        tiltPauseStart = 0;
+        tiltTryMoveStart = 0;
+        repeatedObstacleCount = 0;
+        lastObstacleMs = 0;
+        logEvent(EVT_AUTO_START);
+      }
+
+      continue;
+    }
+    
+    if (c == 'X') {   // включить автопилот вручную из web
+      autoMode = true;
+      lastHB = millis();
+
+      if (!autoMissionActive) {
+        autoMissionActive = true;
+        autoMissionStart = millis();
+        tiltRetryCount = 0;
+        tiltPauseActive = false;
+        tiltBadCount = 0;
+        tiltGoodCount = 0;
+        tiltFirstBadMs = 0;
+        tiltPauseStart = 0;
+        tiltTryMoveStart = 0;
+        repeatedObstacleCount = 0;
+        lastObstacleMs = 0;
+        logEvent(EVT_AUTO_START);
+      }
+      continue;
+    }
+
+    if (c == 'M') {   // ручной режим
       autoMode = false;
+      autoMissionActive = false;
+      tiltPauseActive = false;
+      tiltPauseStart = 0;
+      tiltTryMoveStart = 0;
+      tiltRetryCount = 0;
+      tiltBadCount = 0;
+      tiltGoodCount = 0;
+      tiltFirstBadMs = 0;
+      repeatedObstacleCount = 0;
+      lastObstacleMs = 0;
+      logEvent(EVT_AUTO_END);
       continue;
     }
 
@@ -566,6 +663,7 @@ void handleManual() {
 void handleAutoFwd() {
   static bool obstacleLogged = false;
 
+  // --- Препятствие спереди ---
   if (dF < DIST_FRONT_STOP) {
     stopMotors();
 
@@ -574,43 +672,122 @@ void handleAutoFwd() {
       obstacleLogged = true;
     }
 
+    // Память препятствия: если снова быстро упёрлись почти в том же месте
+    if (millis() - lastObstacleMs <= OBSTACLE_MEMORY_MS) {
+      if (repeatedObstacleCount < 255) repeatedObstacleCount++;
+    } else {
+      repeatedObstacleCount = 1;
+    }
+    lastObstacleMs = millis();
+
+    // Совсем тупик: спереди и с боков тесно
     if (dL < DIST_SIDE_DEAD && dR < DIST_SIDE_DEAD) {
       robotState = ST_AUTO_DEAD;
       buzzPattern(PAT_SOS);
       logEvent(EVT_DEAD_END);
-    } else {
-      turnToLeft = (dL >= dR);
-      robotState = ST_AUTO_TURN;
+      return;
     }
+
+    // Если слишком много раз подряд упираемся в одно и то же
+    if (repeatedObstacleCount >= TURN_FAIL_LIMIT) {
+      robotState = ST_AUTO_DEAD;
+      stopMotors();
+      buzzPattern(PAT_SOS);
+      logEvent(EVT_DEAD_END);
+      return;
+    }
+
+    // Выбираем сторону разворота
+    reverseTurnToLeft = (dL >= dR);
+
+    // Сначала короткий реверс
+    reverseStartMs = millis();
+    robotState = ST_AUTO_REVERSE;
     return;
   }
 
   obstacleLogged = false;
 
-  long diff = (long)dR - (long)dL;
-  int lSpd = SPEED_AUTO, rSpd = SPEED_AUTO;
+  // Если долго едем нормально — сбрасываем память препятствия
+  if (dF > 35 && millis() - lastObstacleMs > OBSTACLE_MEMORY_MS) {
+    repeatedObstacleCount = 0;
+  }
 
-  if (diff > HYSTERESIS) {
-    lSpd = SPEED_AUTO_STEER_HI;
-    rSpd = SPEED_AUTO_STEER_LO;
-  } else if (diff < -HYSTERESIS) {
-    lSpd = SPEED_AUTO_STEER_LO;
-    rSpd = SPEED_AUTO_STEER_HI;
+  // --- Адаптивная скорость по свободе впереди ---
+  int base;
+  if (dF > 60) {
+    base = SPEED_AUTO_MAX;
+  } else if (dF > 40) {
+    base = 75;
+  } else if (dF > 25) {
+    base = SPEED_AUTO;
+  } else {
+    base = SPEED_AUTO_MIN;
+  }
+
+  // Если по бокам тесно — снижаем базу
+  if (dL < DIST_SIDE_WARN || dR < DIST_SIDE_WARN) {
+    base = min(base, 60);
+  }
+
+  // Подруливание по разнице расстояний справа/слева
+  long diff = (long)dR - (long)dL;
+
+  // Пропорциональная коррекция
+  int steer = constrain(diff * 2, -35, 35);
+
+  int lSpd = constrain(base + steer, SPEED_AUTO_MIN, SPEED_AUTO_MAX);
+  int rSpd = constrain(base - steer, SPEED_AUTO_MIN, SPEED_AUTO_MAX);
+
+  // Агрессивнее отталкиваемся от опасно близкой стенки
+  if (dL < DIST_SIDE_DEAD) {
+    lSpd = constrain(base + 25, SPEED_AUTO_MIN, SPEED_AUTO_MAX);
+    rSpd = constrain(base - 25, SPEED_AUTO_MIN, SPEED_AUTO_MAX);
+  }
+  if (dR < DIST_SIDE_DEAD) {
+    lSpd = constrain(base - 25, SPEED_AUTO_MIN, SPEED_AUTO_MAX);
+    rSpd = constrain(base + 25, SPEED_AUTO_MIN, SPEED_AUTO_MAX);
   }
 
   setMotors(lSpd, rSpd);
+}
+
+void handleAutoReverse(unsigned long now) {
+  // Короткий откат назад перед разворотом
+  setMotors(-REVERSE_SPEED, -REVERSE_SPEED);
+
+  if (now - reverseStartMs >= REVERSE_BEFORE_TURN_MS) {
+    stopMotors();
+    turnToLeft = reverseTurnToLeft;
+    robotState = ST_AUTO_TURN;
+  }
 }
 
 // ============================================================
 //  ОБРАБОТЧИК: Автопилот — разворот
 // ============================================================
 void handleAutoTurn() {
+  // Если путь открылся — едем дальше
   if (dF > DIST_FRONT_CLEAR) {
     robotState = ST_AUTO_FWD;
     return;
   }
-  if (turnToLeft) setMotors(-SPEED_AUTO,  SPEED_AUTO);
-  else            setMotors( SPEED_AUTO, -SPEED_AUTO);
+
+  // Если в повороте обе стороны очень тесные и впереди не лучше — тупик
+  if (dF < DIST_FRONT_STOP && dL < DIST_SIDE_DEAD && dR < DIST_SIDE_DEAD) {
+    robotState = ST_AUTO_DEAD;
+    stopMotors();
+    buzzPattern(PAT_SOS);
+    logEvent(EVT_DEAD_END);
+    return;
+  }
+
+  // Поворот на месте
+  if (turnToLeft) {
+    setMotors(-SPEED_AUTO_MIN, SPEED_AUTO_MIN);
+  } else {
+    setMotors(SPEED_AUTO_MIN, -SPEED_AUTO_MIN);
+  }
 }
 
 // ============================================================
@@ -620,40 +797,122 @@ void handleAutoDead() {
   stopMotors();
 }
 
+
+
 // ============================================================
 //  ЗАЩИТА ОТ СПУСКА (абсолютный приоритет)
 // ============================================================
-void checkDescent(unsigned long now) {
+void checkTilt(unsigned long now) {
+  // В ручном режиме наклон игнорируем полностью
+  if (robotState == ST_MANUAL) {
+    tiltBadCount = 0;
+    tiltGoodCount = 0;
+    tiltFirstBadMs = 0;
+    return;
+  }
+
+  // --- Подтверждение опасного наклона ---
   if (pitch < DESCENT_TRIG) {
-    if (!descentAlertActive && !descentCrawlActive) {
-      descentAlertActive = true;
-      descentStart       = now;
-      robotState         = ST_DESCENT_ALERT;
+    tiltGoodCount = 0;
+
+    if (tiltBadCount == 0) {
+      tiltFirstBadMs = now;
+    }
+
+    if (tiltBadCount < 255) tiltBadCount++;
+
+    bool confirmedByCount = (tiltBadCount >= TILT_CONFIRM_COUNT);
+    bool confirmedByTime  = (tiltFirstBadMs != 0 && (now - tiltFirstBadMs >= TILT_CONFIRM_MS));
+
+    if ((confirmedByCount || confirmedByTime) && !tiltPauseActive) {
+      tiltPauseActive = true;
+      tiltPauseStart = now;
+      robotState = ST_TILT_PAUSE;
       stopMotors();
       buzzContinuous();
-      logEvent(EVT_DESCENT);    // лог начала спуска — НОВОЕ
-
-    } else if (descentAlertActive && !descentCrawlActive) {
-      if (now - descentStart >= DESCENT_HOLD) {
-        descentAlertActive = false;
-        descentCrawlActive = true;
-        robotState         = ST_DESCENT_CRAWL;
-        buzzPattern(PAT_CRAWL);
-        setMotors(SPEED_SLOW, SPEED_SLOW);
-      }
+      logEvent(EVT_TILT);
     }
+    return;
+  }
 
-  } else if (pitch > RECOVERY_TRIG) {
-    if (descentAlertActive || descentCrawlActive) {
-      descentAlertActive = false;
-      descentCrawlActive = false;
-      stopMotors();
-      buzzOff();
-      motorCmd = 'S';
-      logEvent(EVT_DESCENT_END);
-      robotState = ST_AUTO_FWD;
-      buzzPattern(PAT_BEACON);
-    }
+  // --- Если наклон стал безопаснее ---
+  tiltBadCount = 0;
+  tiltFirstBadMs = 0;
+
+  if (pitch > RECOVERY_TRIG) {
+    if (tiltGoodCount < 255) tiltGoodCount++;
+  } else {
+    tiltGoodCount = 0;
+  }
+}
+
+void handleTiltPause(unsigned long now) {
+  stopMotors();
+
+  if (!tiltPauseActive) {
+    robotState = ST_AUTO_FWD;
+    return;
+  }
+
+  // Если за время паузы робот уже выровнялся — возвращаем обычный автопилот
+  if (tiltGoodCount >= TILT_RELEASE_COUNT) {
+    tiltPauseActive = false;
+    tiltRetryCount = 0;
+    tiltBadCount = 0;
+    tiltGoodCount = 0;
+    tiltFirstBadMs = 0;
+    buzzPattern(PAT_BEACON, 1);
+    logEvent(EVT_TILT_RESUME);
+    robotState = ST_AUTO_FWD;
+    return;
+  }
+
+  // Пауза ещё не закончилась
+  if (now - tiltPauseStart < TILT_PAUSE_MS) {
+    return;
+  }
+
+  // Достигли лимита попыток — считаем участок непреодолимым
+  if (tiltRetryCount >= TILT_RETRY_LIMIT) {
+    tiltPauseActive = false;
+    stopMotors();
+    robotState = ST_AUTO_DEAD;
+    buzzPattern(PAT_SOS);
+    logEvent(EVT_DEAD_END);
+    return;
+  }
+
+  // После паузы делаем короткую попытку движения
+  tiltTryMoveStart = now;
+  robotState = ST_TILT_TRY_MOVE;
+  buzzPattern(PAT_BEACON, 1);
+}
+
+void handleTiltTryMove(unsigned long now) {
+  // Короткая попытка движения вперёд
+  setMotors(TILT_TRY_SPEED, TILT_TRY_SPEED);
+
+  // Если робот уже выровнялся — возвращаемся в обычный автопилот
+  if (tiltGoodCount >= TILT_RELEASE_COUNT) {
+    tiltPauseActive = false;
+    tiltRetryCount = 0;
+    tiltBadCount = 0;
+    tiltGoodCount = 0;
+    tiltFirstBadMs = 0;
+    buzzPattern(PAT_BEACON, 1);
+    logEvent(EVT_TILT_RESUME);
+    robotState = ST_AUTO_FWD;
+    return;
+  }
+
+  // Закончилась короткая попытка, но наклон ещё не нормализовался
+  if (now - tiltTryMoveStart >= TILT_TRY_MOVE_MS) {
+    stopMotors();
+    if (tiltRetryCount < 255) tiltRetryCount++;
+    tiltPauseStart = now;
+    tiltPauseActive = true;
+    robotState = ST_TILT_PAUSE;
+    buzzContinuous();
   }
 }
 
@@ -661,9 +920,12 @@ void checkDescent(unsigned long now) {
 //  СКАНИРОВАНИЕ СЕРВОЙ В АВТОПИЛОТЕ
 // ============================================================
 void updateScan(unsigned long now) {
+
   if (robotState != ST_AUTO_FWD &&
+      robotState != ST_AUTO_REVERSE &&
       robotState != ST_AUTO_TURN &&
-      robotState != ST_AUTO_DEAD) return;
+      robotState != ST_AUTO_DEAD &&
+      robotState != ST_TILT_TRY_MOVE) return;
 
   if (now - lastScan < SCAN_PERIOD) return;
   lastScan = now;
@@ -756,89 +1018,106 @@ void loop() {
 
   // ── 4. АБСОЛЮТНЫЙ ПРИОРИТЕТ: защита от спуска ──────────────
   if (robotState != ST_MANUAL) {
-    checkDescent(now);
+    checkTilt(now);
   }
 
   // ── 5. Одометрия и логирование маршрута — НОВОЕ ────────────
-  if (robotState != ST_DESCENT_ALERT && robotState != ST_DESCENT_CRAWL) {
+  if (robotState != ST_TILT_PAUSE) {
     updateOdometry();
   }
 
   // ── 6. Защита от потери оператора на долгое время ───────────
-  if (!abandonmentActive &&
-      (now - lastHB >= ABANDON_TIMEOUT) &&
-      robotState != ST_DESCENT_ALERT &&
-      robotState != ST_DESCENT_CRAWL) {
-    abandonmentActive = true;
-    robotState = ST_AUTO_DEAD;
-    motorCmd = 'S';
-    stopMotors();
-    buzzPattern(PAT_ABANDONED, 100);
-  }
+
 
   // ── 7. Основная логика (если нет тревоги спуска) ───────────
-  if (robotState != ST_DESCENT_ALERT && robotState != ST_DESCENT_CRAWL) {
+  {
 
-    // bool espAlive = (now - lastHB <= HB_TIMEOUT);
-    bool espAlive = autoMode ? true : (now - lastHB <= HB_TIMEOUT);
+    bool hbTimedOut = (now - lastHB > MANUAL_FAILSAFE_TIMEOUT);
 
-    // 🔴 1. ESP32 умер
-    if (!espAlive && !autoMode) {
-      if (robotState != ST_AUTO_DEAD) {
+    // Автопилот нужен, если:
+    // 1) его включили вручную,
+    // 2) или клиент пропал и началась автономная миссия
+    bool shouldAuto = autoMode || !clientConnected || autoMissionActive;
+
+    // Ручной режим допустим только когда клиент на связи и heartbeat живой
+    bool shouldManual = (!shouldAuto) && clientConnected && !hbTimedOut;
+
+    if (shouldAuto) {
+      if (!autoMissionActive) {
+        autoMissionActive = true;
+        autoMissionStart = now;
+        tiltRetryCount = 0;
+        tiltPauseStart = 0;
+        tiltTryMoveStart = 0;
+        tiltPauseActive = false;
+        tiltBadCount = 0;
+        tiltGoodCount = 0;
+        tiltFirstBadMs = 0;
+        repeatedObstacleCount = 0;
+        lastObstacleMs = 0;
+        logEvent(EVT_AUTO_START);
+      }
+
+      // Ограничение миссии: 20 минут
+      if (now - autoMissionStart >= AUTO_MISSION_TIME) {
+        autoMissionActive = false;
+        autoMode = false;
         robotState = ST_AUTO_DEAD;
         stopMotors();
-        buzzPattern(PAT_BEACON);
-      }
-    }
-    // 🟡 2. ESP32 жив
-    else {
-
-      // 👉 Логика автопилота
-      bool shouldAuto = (!clientConnected) || autoMode;
-
-      if (shouldAuto) {
-
-        if (robotState != ST_AUTO_FWD &&
-            robotState != ST_AUTO_TURN &&
-            robotState != ST_AUTO_DEAD) {
-
-          robotState = ST_AUTO_FWD;
-          buzzPattern(PAT_BEACON);
-
-          if (!logSignalLostSent) {
-            logEvent(EVT_SIGNAL_LOST);
-            logSignalLostSent = true;
-          }
-        }
-
+        buzzPattern(PAT_ABANDONED, 20);
+        logEvent(EVT_AUTO_END);
       } else {
-
-        // 🟢 Ручной режим
-        if (robotState != ST_MANUAL) {
-          robotState = ST_MANUAL;
-          stopMotors();
-          buzzOff();
-          abandonmentActive = false;
-
-          if (logSignalLostSent) {
-            logEvent(EVT_SIGNAL_BACK);
-            logSignalLostSent = false;
-          }
+        if (robotState == ST_MANUAL) {
+          robotState = ST_AUTO_FWD;
+          buzzPattern(PAT_BEACON, 1);
+        } else if (robotState != ST_AUTO_FWD &&
+                  robotState != ST_AUTO_REVERSE &&
+                  robotState != ST_AUTO_TURN &&
+                  robotState != ST_AUTO_DEAD &&
+                  robotState != ST_TILT_PAUSE &&
+                  robotState != ST_TILT_TRY_MOVE) {
+          robotState = ST_AUTO_FWD;
         }
       }
+    } else if (shouldManual) {
+      if (robotState != ST_MANUAL) {
+        robotState = ST_MANUAL;
+        autoMissionActive = false;
+        tiltPauseActive = false;
+        tiltPauseStart = 0;
+        tiltTryMoveStart = 0;
+        tiltRetryCount = 0;
+        tiltBadCount = 0;
+        tiltGoodCount = 0;
+        tiltFirstBadMs = 0;
+        repeatedObstacleCount = 0;
+        lastObstacleMs = 0;
+        stopMotors();
+        buzzOff();
+        logEvent(EVT_AUTO_END);
+      }
+    } else {
+      // Потеря heartbeat в ручном режиме -> безопасный stop
+      robotState = ST_MANUAL;
+      stopMotors();
+      motorCmd = 'S';
     }
 
     // ── Выполнение ───────────────────────────────
+
     switch (robotState) {
-      case ST_MANUAL:    handleManual();   break;
-      case ST_AUTO_FWD:  handleAutoFwd();  break;
-      case ST_AUTO_TURN: handleAutoTurn(); break;
-      case ST_AUTO_DEAD: handleAutoDead(); break;
+      case ST_MANUAL:        handleManual();           break;
+      case ST_AUTO_FWD:      handleAutoFwd();          break;
+      case ST_AUTO_REVERSE:  handleAutoReverse(now);   break;
+      case ST_AUTO_TURN:     handleAutoTurn();         break;
+      case ST_AUTO_DEAD:     handleAutoDead();         break;
+      case ST_TILT_PAUSE:    handleTiltPause(now);     break;
+      case ST_TILT_TRY_MOVE: handleTiltTryMove(now);   break;
       default: break;
     }
 
     // ── Камера / сканирование ───────────────────
-    if (!clientConnected || autoMode) {
+    if (robotState != ST_MANUAL) {
       updateScan(now);
     }
   }
