@@ -605,48 +605,32 @@ static esp_err_t handleCmd(httpd_req_t* req) {
 }
 
 static esp_err_t handleAuto(httpd_req_t *req) {
-  char buf[8];
-  // int len = httpd_req_recv(req, buf, sizeof(buf) - 1);
-
-  int total = 0;
-
-  while (total < (int)sizeof(buf) - 1) {
-    int r = httpd_req_recv(req, buf + total, sizeof(buf) - 1 - total);
-    if (r <= 0) {
-      break;
+    char buf[8];
+    int total = 0;
+    while (total < (int)sizeof(buf) - 1) {
+        int r = httpd_req_recv(req, buf + total, sizeof(buf) - 1 - total);
+        if (r <= 0) break;
+        total += r;
     }
-    total += r;
-  }
+    if (total <= 0) {
+        httpd_resp_send(req, "ERR", 3);
+        return ESP_FAIL;
+    }
+    buf[total] = '\0';
 
-  // проверка, что что-то реально получили
-  if (total <= 0) {
-    httpd_resp_send(req, "ERR", 3);
-    return ESP_FAIL;
-  }
-
-  // завершаем строку
-  buf[total] = '\0';
-
-  if (total <= 0 || total >= sizeof(buf)) {
-    httpd_resp_send(req, "ERR", 3);
-    return ESP_FAIL;
-  }
-  buf[total] = '\0';
-
-  if (buf[0] == '1') {
-    autoMode = true;
-    Serial.write('X');   // включить автопилот
-    strncpy(crawlerStatus, "AUTO", sizeof(crawlerStatus) - 1);
+    if (buf[0] == '1') {
+        autoMode = true;
+        Serial.write('X');
+        strncpy(crawlerStatus, "AUTO", sizeof(crawlerStatus) - 1);
+    } else {
+        autoMode = false;
+        Serial.write('M');
+        strncpy(crawlerStatus, "MANUAL", sizeof(crawlerStatus) - 1);
+    }
     crawlerStatus[sizeof(crawlerStatus) - 1] = '\0';
-  } else {
-    autoMode = false;
-    Serial.write('M');   // ручной режим
-    strncpy(crawlerStatus, "MANUAL", sizeof(crawlerStatus) - 1);
-    crawlerStatus[sizeof(crawlerStatus) - 1] = '\0';
-  }
 
-  httpd_resp_send(req, "OK", 2);
-  return ESP_OK;
+    httpd_resp_send(req, "OK", 2);
+    return ESP_OK;
 }
 
 // GET /rec?on=1|0  → включить/выключить запись
@@ -814,6 +798,7 @@ void setup() {
   WiFi.mode(WIFI_AP);
   WiFi.softAPConfig(AP_IP, AP_GW, AP_SN);
   WiFi.softAP(AP_SSID, AP_PASS);
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);   // ← максимум (по умолчанию 17 dBm)
 
 
   // HTTP серверы
@@ -833,6 +818,19 @@ void loop() {
   // ── Хартбит → Arduino только пока есть подключённый клиент ─────
   // Если клиентов нет — Arduino потеряет хартбит и через HB_TIMEOUT
   // (3 сек) перейдёт в режим автопилота. Это и есть нужное поведение.
+
+  // ── Повторная попытка инициализации SD, если не удалась ─────
+  static unsigned long lastSdRetry = 0;
+  if (!sdOK && now - lastSdRetry > 5000) {
+      lastSdRetry = now;
+      SD_MMC.end();        // на всякий случай «отпустить» SD
+      delay(50);
+      sdOK = initSD();
+      if (sdOK && !isRecording) {
+          isRecording = startRecordingSession();
+          if (isRecording) logFilePath = "";
+      }
+  }
 
 
   if (now - lastHB >= HEARTBEAT_MS) {

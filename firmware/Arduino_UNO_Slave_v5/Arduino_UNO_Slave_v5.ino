@@ -120,7 +120,7 @@
 #define MOTOR_R_SCALE       0.90f
 
 unsigned long lastCmdTime = 0;
-#define CMD_TIMEOUT 500   // мс
+#define CMD_TIMEOUT 400   // мс
 
 // ── Одометрия и логирование ──────────────────────────────
 // Скорость при SPEED_FULL: откалибруй один раз!
@@ -147,6 +147,7 @@ RobotState robotState = ST_MANUAL;
 bool autoMode = false;
 
 bool autoMissionActive = false;          // сейчас выполняется автономная миссия
+bool autoMissionExpired = false;   // миссия завершилась по таймауту, повторно не запускать
 unsigned long autoMissionStart = 0;      // старт миссии
 unsigned long tiltPauseStart = 0;        // начало паузы из-за наклона
 unsigned long tiltTryMoveStart = 0;      // старт короткой попытки движения
@@ -266,6 +267,11 @@ enum LogEvent : uint8_t {
 bool logSignalLostSent = false;  // чтобы не спамить при потере связи
 
 void logEvent(LogEvent evt) {
+  // Не спамим лог в ручном режиме — только важные события
+  if (robotState == ST_MANUAL && 
+      evt != EVT_AUTO_START && evt != EVT_AUTO_END) {
+    return;
+  }
   const char* evtName;
   switch (evt) {
     case EVT_CHECKPOINT:  evtName = "CHK";    break;
@@ -301,6 +307,9 @@ void logEvent(LogEvent evt) {
 void updateOdometry() {
   unsigned long now = millis();
   if (now - odo_last_ms < (unsigned long)LOG_PERIOD) return;
+
+  // Если только что был приём команды — подождём следующего цикла
+  if (now - lastCmdTime < 50) return;
 
   float dt = (now - odo_last_ms) / 1000.0f;
   odo_last_ms = now;
@@ -531,73 +540,54 @@ void uartRead() {
     // char c = (char)Serial.read();
 
     if (c == 'H') {
-      bool wasDisconnected = !clientConnected;
-      lastHB = millis();
-      hbSeen = true;
-      clientConnected = true;
+        bool wasDisconnected = !clientConnected;
+        lastHB = millis();
+        hbSeen = true;
+        clientConnected = true;
 
-      if (wasDisconnected && logSignalLostSent) {
-        logEvent(EVT_SIGNAL_BACK);
-        logSignalLostSent = false;
-      }
-      continue;
+        if (wasDisconnected) {
+            // Оператор вернулся. Если был в автономной миссии (не явно через 'X'),
+            // то прекращаем её и передаём управление оператору.
+            // Если autoMode==true (оператор сам включил AUTO) — оставляем миссию.
+            if (autoMissionActive && !autoMode) {
+                autoMissionActive = false;
+                logEvent(EVT_AUTO_END);
+            }
+            autoMissionExpired = false;
+            if (logSignalLostSent) {
+                logEvent(EVT_SIGNAL_BACK);
+                logSignalLostSent = false;
+            }
+        }
+        continue;
     }
 
     if (c == 'A') {
-      lastHB = millis();
-      hbSeen = true;
+        lastHB = millis();
+        hbSeen = true;
 
-      if (clientConnected) {
-        logEvent(EVT_SIGNAL_LOST);
-        logSignalLostSent = true;
-      }
-
-      clientConnected = false;
-
-      // Если уже включён автопилот или оператор пропал, миссию не останавливаем
-
-      if (!autoMissionActive) {
-        autoMissionActive = true;
-        autoMissionStart = millis();
-        tiltRetryCount = 0;
-        tiltPauseActive = false;
-        tiltBadCount = 0;
-        tiltGoodCount = 0;
-        tiltFirstBadMs = 0;
-        tiltPauseStart = 0;
-        tiltTryMoveStart = 0;
-        repeatedObstacleCount = 0;
-        lastObstacleMs = 0;
-        logEvent(EVT_AUTO_START);
-      }
-
-      continue;
+        if (clientConnected && !logSignalLostSent) {
+            logEvent(EVT_SIGNAL_LOST);
+            logSignalLostSent = true;
+        }
+        clientConnected = false;
+        // Инициализацию миссии делает loop() — здесь ничего не трогаем
+        continue;
     }
     
     if (c == 'X') {   // включить автопилот вручную из web
-      autoMode = true;
-      lastHB = millis();
-
-      if (!autoMissionActive) {
-        autoMissionActive = true;
-        autoMissionStart = millis();
-        tiltRetryCount = 0;
-        tiltPauseActive = false;
-        tiltBadCount = 0;
-        tiltGoodCount = 0;
-        tiltFirstBadMs = 0;
-        tiltPauseStart = 0;
-        tiltTryMoveStart = 0;
-        repeatedObstacleCount = 0;
-        lastObstacleMs = 0;
-        logEvent(EVT_AUTO_START);
-      }
-      continue;
+        autoMode = true;
+        autoMissionExpired = false;
+        lastHB = millis();
+        // Запуск миссии произойдёт в loop() автоматически через shouldAuto
+        continue;
     }
+
 
     if (c == 'M') {   // ручной режим
       autoMode = false;
       autoMissionActive = false;
+      autoMissionExpired = false;
       tiltPauseActive = false;
       tiltPauseStart = 0;
       tiltTryMoveStart = 0;
@@ -672,7 +662,7 @@ void handleAutoFwd() {
       obstacleLogged = true;
     }
 
-    // Память препятствия: если снова быстро упёрлись почти в том же месте
+    // Память препятствия
     if (millis() - lastObstacleMs <= OBSTACLE_MEMORY_MS) {
       if (repeatedObstacleCount < 255) repeatedObstacleCount++;
     } else {
@@ -680,7 +670,7 @@ void handleAutoFwd() {
     }
     lastObstacleMs = millis();
 
-    // Совсем тупик: спереди и с боков тесно
+    // Тупик: спереди и с боков тесно
     if (dL < DIST_SIDE_DEAD && dR < DIST_SIDE_DEAD) {
       robotState = ST_AUTO_DEAD;
       buzzPattern(PAT_SOS);
@@ -688,7 +678,7 @@ void handleAutoFwd() {
       return;
     }
 
-    // Если слишком много раз подряд упираемся в одно и то же
+    // Много раз подряд упираемся — тупик
     if (repeatedObstacleCount >= TURN_FAIL_LIMIT) {
       robotState = ST_AUTO_DEAD;
       stopMotors();
@@ -697,10 +687,7 @@ void handleAutoFwd() {
       return;
     }
 
-    // Выбираем сторону разворота
     reverseTurnToLeft = (dL >= dR);
-
-    // Сначала короткий реверс
     reverseStartMs = millis();
     robotState = ST_AUTO_REVERSE;
     return;
@@ -708,7 +695,7 @@ void handleAutoFwd() {
 
   obstacleLogged = false;
 
-  // Если долго едем нормально — сбрасываем память препятствия
+  // Сбрасываем память препятствия, если уехали
   if (dF > 35 && millis() - lastObstacleMs > OBSTACLE_MEMORY_MS) {
     repeatedObstacleCount = 0;
   }
@@ -725,28 +712,42 @@ void handleAutoFwd() {
     base = SPEED_AUTO_MIN;
   }
 
-  // Если по бокам тесно — снижаем базу
+  // По бокам тесно — снижаем базу
   if (dL < DIST_SIDE_WARN || dR < DIST_SIDE_WARN) {
     base = min(base, 60);
   }
 
-  // Подруливание по разнице расстояний справа/слева
+  // --- Подруливание ---
   long diff = (long)dR - (long)dL;
 
-  // Пропорциональная коррекция
-  int steer = constrain(diff * 2, -35, 35);
+  int steerGain = 2;
+  if (dL < DIST_SIDE_WARN || dR < DIST_SIDE_WARN) steerGain = 4;
 
-  int lSpd = constrain(base + steer, SPEED_AUTO_MIN, SPEED_AUTO_MAX);
-  int rSpd = constrain(base - steer, SPEED_AUTO_MIN, SPEED_AUTO_MAX);
+  int steer = constrain((int)(diff * steerGain), -40, 40);
 
-  // Агрессивнее отталкиваемся от опасно близкой стенки
+  int lSpd, rSpd;
+  if (steer >= 0) {
+    // diff > 0 → dR > dL → справа простор → поворот направо
+    // => замедляем ПРАВОЕ колесо
+    lSpd = base;
+    rSpd = constrain(base - steer, SPEED_AUTO_MIN, SPEED_AUTO_MAX);
+  } else {
+    // diff < 0 → dL > dR → слева простор → поворот налево
+    // => замедляем ЛЕВОЕ колесо
+    lSpd = constrain(base + steer, SPEED_AUTO_MIN, SPEED_AUTO_MAX);
+    rSpd = base;
+  }
+
+  // Аварийный отскок от опасно близкой стенки
   if (dL < DIST_SIDE_DEAD) {
-    lSpd = constrain(base + 25, SPEED_AUTO_MIN, SPEED_AUTO_MAX);
-    rSpd = constrain(base - 25, SPEED_AUTO_MIN, SPEED_AUTO_MAX);
+    // Слева вплотную — уходим вправо: правое замедляем
+    lSpd = base;
+    rSpd = SPEED_AUTO_MIN;
   }
   if (dR < DIST_SIDE_DEAD) {
-    lSpd = constrain(base - 25, SPEED_AUTO_MIN, SPEED_AUTO_MAX);
-    rSpd = constrain(base + 25, SPEED_AUTO_MIN, SPEED_AUTO_MAX);
+    // Справа вплотную — уходим влево: левое замедляем
+    lSpd = SPEED_AUTO_MIN;
+    rSpd = base;
   }
 
   setMotors(lSpd, rSpd);
@@ -767,27 +768,36 @@ void handleAutoReverse(unsigned long now) {
 //  ОБРАБОТЧИК: Автопилот — разворот
 // ============================================================
 void handleAutoTurn() {
-  // Если путь открылся — едем дальше
-  if (dF > DIST_FRONT_CLEAR) {
-    robotState = ST_AUTO_FWD;
-    return;
-  }
-
-  // Если в повороте обе стороны очень тесные и впереди не лучше — тупик
-  if (dF < DIST_FRONT_STOP && dL < DIST_SIDE_DEAD && dR < DIST_SIDE_DEAD) {
-    robotState = ST_AUTO_DEAD;
-    stopMotors();
-    buzzPattern(PAT_SOS);
-    logEvent(EVT_DEAD_END);
-    return;
-  }
-
-  // Поворот на месте
-  if (turnToLeft) {
-    setMotors(-SPEED_AUTO_MIN, SPEED_AUTO_MIN);
-  } else {
-    setMotors(SPEED_AUTO_MIN, -SPEED_AUTO_MIN);
-  }
+    static unsigned long turnStart = 0;
+    if (turnStart == 0) turnStart = millis();
+    
+    if (dF > DIST_FRONT_CLEAR) {
+        turnStart = 0;
+        robotState = ST_AUTO_FWD;
+        return;
+    }
+    
+    // Защита от зацикливания: не крутимся дольше 5 сек
+    if (millis() - turnStart > 5000UL) {  
+        turnStart = 0;
+        robotState = ST_AUTO_DEAD;
+        stopMotors();
+        buzzPattern(PAT_SOS);
+        logEvent(EVT_DEAD_END);
+        return;
+    }
+    
+    if (dF < DIST_FRONT_STOP && dL < DIST_SIDE_DEAD && dR < DIST_SIDE_DEAD) {
+        turnStart = 0;
+        robotState = ST_AUTO_DEAD;
+        stopMotors();
+        buzzPattern(PAT_SOS);
+        logEvent(EVT_DEAD_END);
+        return;
+    }
+    
+    if (turnToLeft) setMotors(-SPEED_AUTO_MIN, SPEED_AUTO_MIN);
+    else            setMotors(SPEED_AUTO_MIN, -SPEED_AUTO_MIN);
 }
 
 // ============================================================
@@ -795,6 +805,10 @@ void handleAutoTurn() {
 // ============================================================
 void handleAutoDead() {
   stopMotors();
+  if (scanAngle != 90) {
+    scanAngle = 90;
+    camServo.write(90);
+  }
 }
 
 
@@ -920,11 +934,10 @@ void handleTiltTryMove(unsigned long now) {
 //  СКАНИРОВАНИЕ СЕРВОЙ В АВТОПИЛОТЕ
 // ============================================================
 void updateScan(unsigned long now) {
-
+  // Сканируем только когда активно двигаемся
   if (robotState != ST_AUTO_FWD &&
       robotState != ST_AUTO_REVERSE &&
       robotState != ST_AUTO_TURN &&
-      robotState != ST_AUTO_DEAD &&
       robotState != ST_TILT_TRY_MOVE) return;
 
   if (now - lastScan < SCAN_PERIOD) return;
@@ -994,7 +1007,7 @@ void loop() {
 
   // Отправляем REC_AUTO только после первого heartbeat от ESP32
   if (!recAutoSent && hbSeen) {
-    // comSerial.print("REC_AUTO\n");
+    comSerial.print("REC_AUTO\n");
     // Serial.print("REC_AUTO\n");
     recAutoSent = true;
   }
@@ -1031,95 +1044,101 @@ void loop() {
 
   // ── 7. Основная логика (если нет тревоги спуска) ───────────
   {
+      bool hbTimedOut = (now - lastHB > MANUAL_FAILSAFE_TIMEOUT);
 
-    bool hbTimedOut = (now - lastHB > MANUAL_FAILSAFE_TIMEOUT);
-
-    // Автопилот нужен, если:
-    // 1) его включили вручную,
-    // 2) или клиент пропал и началась автономная миссия
-    bool shouldAuto = autoMode || !clientConnected || autoMissionActive;
-
-    // Ручной режим допустим только когда клиент на связи и heartbeat живой
-    bool shouldManual = (!shouldAuto) && clientConnected && !hbTimedOut;
-
-    if (shouldAuto) {
-      if (!autoMissionActive) {
-        autoMissionActive = true;
-        autoMissionStart = now;
-        tiltRetryCount = 0;
-        tiltPauseStart = 0;
-        tiltTryMoveStart = 0;
-        tiltPauseActive = false;
-        tiltBadCount = 0;
-        tiltGoodCount = 0;
-        tiltFirstBadMs = 0;
-        repeatedObstacleCount = 0;
-        lastObstacleMs = 0;
-        logEvent(EVT_AUTO_START);
+      // Если heartbeat вообще пропал (ESP32 отвалилась полностью) —
+      // считаем клиента отключённым и запускаем автономную миссию
+      if (hbTimedOut && clientConnected) {
+          clientConnected = false;
+          if (!logSignalLostSent) {
+              logEvent(EVT_SIGNAL_LOST);
+              logSignalLostSent = true;
+          }
       }
 
-      // Ограничение миссии: 20 минут
-      if (now - autoMissionStart >= AUTO_MISSION_TIME) {
-        autoMissionActive = false;
-        autoMode = false;
-        robotState = ST_AUTO_DEAD;
-        stopMotors();
-        buzzPattern(PAT_ABANDONED, 20);
-        logEvent(EVT_AUTO_END);
-      } else {
-        if (robotState == ST_MANUAL) {
-          robotState = ST_AUTO_FWD;
-          buzzPattern(PAT_BEACON, 1);
-        } else if (robotState != ST_AUTO_FWD &&
-                  robotState != ST_AUTO_REVERSE &&
-                  robotState != ST_AUTO_TURN &&
-                  robotState != ST_AUTO_DEAD &&
-                  robotState != ST_TILT_PAUSE &&
-                  robotState != ST_TILT_TRY_MOVE) {
-          robotState = ST_AUTO_FWD;
-        }
+      // Автопилот включается если:
+      //  1) оператор явно нажал AUTO ('X')
+      //  2) клиент отвалился (нет heartbeat или пришло 'A')
+      //  3) уже идёт автономная миссия
+      bool shouldAuto = (autoMode || !clientConnected || autoMissionActive || hbTimedOut) && !autoMissionExpired; 
+
+      // Ручной режим ТОЛЬКО когда клиент живой и heartbeat свежий
+      bool shouldManual = clientConnected && !hbTimedOut && !autoMode && !autoMissionActive && !autoMissionExpired;
+
+      if (shouldAuto) {
+          if (!autoMissionActive) {
+              autoMissionActive = true;
+              autoMissionStart = now;
+              tiltRetryCount = 0;
+              tiltPauseStart = 0;
+              tiltTryMoveStart = 0;
+              tiltPauseActive = false;
+              tiltBadCount = 0;
+              tiltGoodCount = 0;
+              tiltFirstBadMs = 0;
+              repeatedObstacleCount = 0;
+              lastObstacleMs = 0;
+              logEvent(EVT_AUTO_START);
+          }
+
+          // Ограничение миссии: 20 минут
+          if (now - autoMissionStart >= AUTO_MISSION_TIME) {
+              autoMissionActive = false;
+              autoMode = false;
+              autoMissionExpired = true;
+              robotState = ST_AUTO_DEAD;
+              stopMotors();
+              buzzPattern(PAT_ABANDONED, 20);
+              logEvent(EVT_AUTO_END);
+          } else {
+              if (robotState == ST_MANUAL) {
+                  robotState = ST_AUTO_FWD;
+                  buzzPattern(PAT_BEACON, 1);
+              } else if (robotState != ST_AUTO_FWD &&
+                        robotState != ST_AUTO_REVERSE &&
+                        robotState != ST_AUTO_TURN &&
+                        robotState != ST_AUTO_DEAD &&
+                        robotState != ST_TILT_PAUSE &&
+                        robotState != ST_TILT_TRY_MOVE) {
+                  robotState = ST_AUTO_FWD;
+              }
+          }
+      } else if (shouldManual) {
+          if (robotState != ST_MANUAL) {
+              robotState = ST_MANUAL;
+              autoMissionActive = false;
+              tiltPauseActive = false;
+              tiltPauseStart = 0;
+              tiltTryMoveStart = 0;
+              tiltRetryCount = 0;
+              tiltBadCount = 0;
+              tiltGoodCount = 0;
+              tiltFirstBadMs = 0;
+              repeatedObstacleCount = 0;
+              lastObstacleMs = 0;
+              stopMotors();
+              buzzOff();
+              logEvent(EVT_AUTO_END);
+          }
       }
-    } else if (shouldManual) {
+      // УБИРАЕМ ветку else со stopMotors() — теперь она не нужна,
+      // потому что shouldAuto покрывает случай потери связи
+
+      // ── Выполнение ───────────────────────────────
+      switch (robotState) {
+          case ST_MANUAL:        handleManual();           break;
+          case ST_AUTO_FWD:      handleAutoFwd();          break;
+          case ST_AUTO_REVERSE:  handleAutoReverse(now);   break;
+          case ST_AUTO_TURN:     handleAutoTurn();         break;
+          case ST_AUTO_DEAD:     handleAutoDead();         break;
+          case ST_TILT_PAUSE:    handleTiltPause(now);     break;
+          case ST_TILT_TRY_MOVE: handleTiltTryMove(now);   break;
+          default: break;
+      }
+
       if (robotState != ST_MANUAL) {
-        robotState = ST_MANUAL;
-        autoMissionActive = false;
-        tiltPauseActive = false;
-        tiltPauseStart = 0;
-        tiltTryMoveStart = 0;
-        tiltRetryCount = 0;
-        tiltBadCount = 0;
-        tiltGoodCount = 0;
-        tiltFirstBadMs = 0;
-        repeatedObstacleCount = 0;
-        lastObstacleMs = 0;
-        stopMotors();
-        buzzOff();
-        logEvent(EVT_AUTO_END);
+          updateScan(now);
       }
-    } else {
-      // Потеря heartbeat в ручном режиме -> безопасный stop
-      robotState = ST_MANUAL;
-      stopMotors();
-      motorCmd = 'S';
-    }
-
-    // ── Выполнение ───────────────────────────────
-
-    switch (robotState) {
-      case ST_MANUAL:        handleManual();           break;
-      case ST_AUTO_FWD:      handleAutoFwd();          break;
-      case ST_AUTO_REVERSE:  handleAutoReverse(now);   break;
-      case ST_AUTO_TURN:     handleAutoTurn();         break;
-      case ST_AUTO_DEAD:     handleAutoDead();         break;
-      case ST_TILT_PAUSE:    handleTiltPause(now);     break;
-      case ST_TILT_TRY_MOVE: handleTiltTryMove(now);   break;
-      default: break;
-    }
-
-    // ── Камера / сканирование ───────────────────
-    if (robotState != ST_MANUAL) {
-      updateScan(now);
-    }
   }
 
   // ── 8. Обновление зуммера ───────────────────────────────────
