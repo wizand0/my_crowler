@@ -72,7 +72,7 @@ const IPAddress AP_SN(255, 255, 255, 0);
 
 #define UART_BAUD          9600
 #define HEARTBEAT_MS        500
-#define FRAME_SAVE_MS       200   // 5 fps
+#define FRAME_SAVE_MS       500   // 2 fps
 #define CMD_REPEAT_MS       120
 
 // MJPEG
@@ -428,13 +428,16 @@ bool initCamera() {
   config.pixel_format = PIXFORMAT_JPEG;
 
   if (psramFound()) {
-    config.frame_size   = FRAMESIZE_VGA;
-    config.jpeg_quality = 12;
-    config.fb_count     = 2;
+    config.frame_size   = FRAMESIZE_SVGA;
+    config.jpeg_quality = 14;
+    config.fb_count     = 3;   // было 2 — теперь 3 для устранения гонки
+    config.grab_mode    = CAMERA_GRAB_LATEST;   // всегда брать свежий кадр
+    config.fb_location  = CAMERA_FB_IN_PSRAM;
   } else {
     config.frame_size   = FRAMESIZE_QVGA;
     config.jpeg_quality = 16;
     config.fb_count     = 1;
+    config.grab_mode    = CAMERA_GRAB_LATEST;
   }
 
   esp_err_t err = esp_camera_init(&config);
@@ -503,12 +506,37 @@ bool startRecordingSession() {
 // Сохранить один кадр
 void saveFrame(camera_fb_t* fb) {
   if (!sdOK || sessionDir.length() == 0) return;
+  if (!fb || !fb->buf || fb->len < 100) return;   // очевидно пустой кадр
+
+  // Проверка целостности JPEG: должен начинаться FF D8 и заканчиваться FF D9
+  if (fb->buf[0] != 0xFF || fb->buf[1] != 0xD8) return;
+  if (fb->buf[fb->len - 2] != 0xFF || fb->buf[fb->len - 1] != 0xD9) return;
+
   char path[48];
-  snprintf(path, sizeof(path), "%s/%05d.jpg", sessionDir.c_str(), frameNum++);
+  snprintf(path, sizeof(path), "%s/%05d.jpg", sessionDir.c_str(), frameNum);
+
   File f = SD_MMC.open(path, FILE_WRITE);
   if (!f) return;
-  f.write(fb->buf, fb->len);
+
+  // Пишем блоками по 4 КБ — быстрее и надёжнее чем одним большим write
+  const size_t CHUNK = 4096;
+  size_t written = 0;
+  size_t total = fb->len;
+  while (written < total) {
+    size_t n = (total - written > CHUNK) ? CHUNK : (total - written);
+    size_t w = f.write(fb->buf + written, n);
+    if (w != n) {
+      // Запись сорвалась — удалить битый файл
+      f.close();
+      SD_MMC.remove(path);
+      return;
+    }
+    written += w;
+  }
+  f.flush();   // сбросить буфер файловой системы
   f.close();
+
+  frameNum++;  // инкремент только при успешной записи
 }
 
 // Записать строку лога маршрута в CSV — НОВОЕ
