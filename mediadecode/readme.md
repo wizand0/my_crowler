@@ -6,7 +6,8 @@ python fix_jpegs.py C:\REC_0
 После восстановления кадры можно склеить как описано в README:
 
 ```
-ffmpeg -framerate 5 -i REC_0/%05d.jpg -c:v libx264 -pix_fmt yuv420p output.mp4
+PS C:\images\REC_0> ffmpeg -framerate 5 -i C:\Games\images\REC_0\%05d.jpg -c:v libx264 -pix_fmt yuv420p output.mp4
+ffmpeg -framerate 5 -i C:\Games\images\REC_0\%05d.jpg -vf "hflip" -c:v libx264 -pix_fmt yuv420p output.mp4
 ```
 Если ffmpeg жалуется на пропуски в нумерации (после удаления битых), используй с флагом -start_number:
 
